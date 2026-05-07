@@ -27,6 +27,25 @@
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
+      "siren": {
+        "title": "External Siren (Speaker)",
+        "type": "object",
+        "description": "Optional Speaker accessory mirroring the external siren state. Mute to silence an active siren.",
+        "properties": {
+          "enabled": {
+            "title": "Expose siren accessory",
+            "type": "boolean",
+            "default": true,
+            "description": "Off to suppress the siren accessory entirely."
+          },
+          "name": {
+            "title": "Display Name",
+            "type": "string",
+            "default": "Alarm Siren",
+            "description": "Shown in HomeKit."
+          }
+        }
+      },
       "partitions": {
         "title": "Partitions",
         "type": "array",

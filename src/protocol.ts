@@ -121,22 +121,42 @@ export function buildOperation(p: OperationParams): Buffer {
   return Buffer.from(JSON.stringify(op), 'utf8');
 }
 
-export const OPTYPE_ARM = 12;
+/**
+ * Operation types per Appendix B of the Force JSON spec.
+ */
+export const OPTYPE_ARM_AWAY = 12;     // Full Arm
+export const OPTYPE_ARM_HOME1 = 13;
+export const OPTYPE_ARM_HOME2 = 14;
+export const OPTYPE_ARM_HOME3 = 15;
+export const OPTYPE_ARM_HOME4 = 16;
 export const OPTYPE_DISARM = 17;
+export const OPTYPE_ARM_SHABBAT = 43;
+export const OPTYPE_ACTIVATE_OUTPUT = 35;
+export const OPTYPE_DEACTIVATE_OUTPUT = 36;
+
+/** Backward-compatible alias — kept for existing callers. */
+export const OPTYPE_ARM = OPTYPE_ARM_AWAY;
+
+/** Output orders (per Appendix B) used with OPTYPE_ACTIVATE_OUTPUT/DEACTIVATE_OUTPUT. */
+export const OUTPUT_EXTERNAL_SIREN = 1;
+export const OUTPUT_INTERNAL_SIREN = 2;
 
 /**
- * Contact ID-style event type codes seen on this panel.
- * type=760 with qualifier 1/3 is the common "zone open/restore" event.
- * type=407 fires when arming/disarming was triggered remotely (via CMS).
- * type=401 fires when arming/disarming was done locally at the keypad.
- * type=350 fires when the panel reports CMS comm path status — qualifier
- *   3 = restore (path healthy), qualifier 1 = trouble (path failing).
- *   The `zone` field carries the channel/path index (Pima-specific).
+ * Contact ID-style event type codes per Appendix A of the spec.
+ * - 760: zone open/closed (qualifier 1 = open, 3 = closed)
+ * - 770: output activated/de-activated (zone field carries the output #)
+ * - 407: remote arm/disarm via CMS (qualifier 3 = arm, 1 = disarm)
+ * - 401: local user arm/disarm (qualifier 3 = arm, 1 = disarm)
+ * - 350: CMS communication path status (qualifier 3 = restore, 1 = trouble)
+ *   — the `zone` field carries the channel/path index (Pima-specific).
+ * - 130: burglary alarm (qualifier 1 = alarm, 3 = restore)
  */
 export const EVENT_TYPE_ZONE = 760;
+export const EVENT_TYPE_OUTPUT = 770;
 export const EVENT_TYPE_REMOTE_ARM = 407;
 export const EVENT_TYPE_LOCAL_ARM = 401;
 export const EVENT_TYPE_COMM = 350;
+export const EVENT_TYPE_BURGLARY = 130;
 
 /** Qualifier 1 = new event (zone open / disarm). Qualifier 3 = restore (zone close / arm). */
 export const QUALIFIER_NEW = 1;

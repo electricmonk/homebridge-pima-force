@@ -52,6 +52,29 @@ export interface ZoneEvent {
   active: boolean;
 }
 
+/** Output state change (e.g., siren activated). Output 1 = external siren. */
+export interface OutputEvent {
+  output: number;
+  partition: number;
+  active: boolean;
+}
+
+/** Burglary alarm: a zone tripped while armed and is sounding the siren. */
+export interface AlarmEvent {
+  zone: number;
+  partition: number;
+  /** True = alarm in progress; false = alarm restored. */
+  active: boolean;
+}
+
+/**
+ * Arm modes recognized by the panel (Appendix B).
+ * - `away`    — Full Arm (optype 12)
+ * - `home1`-`home4` — Home modes (optype 13-16)
+ * - `shabbat` — Shabbat Arm (optype 43)
+ */
+export type ArmMode = 'away' | 'home1' | 'home2' | 'home3' | 'home4' | 'shabbat';
+
 /**
  * Reported when the panel sends a system/comm status event (e.g. it
  * considers the CMS link restored or troubled). Informational; not a
@@ -77,6 +100,8 @@ export interface PimaDriverEvents {
   arm: [ArmEvent];
   disarm: [ArmEvent];
   zone: [ZoneEvent];
+  output: [OutputEvent];
+  alarm: [AlarmEvent];
   system: [SystemEvent];
   unknown: [PanelFrame];
   error: [Error];

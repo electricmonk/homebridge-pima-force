@@ -6,10 +6,12 @@ import type {
   PlatformConfig,
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
-import { PartitionSwitch, type PartitionAccessoryContext } from './partition-switch.js';
+import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
+import { OUTPUT_EXTERNAL_SIREN } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
-import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
+import { SirenSpeaker, type SirenAccessoryContext } from './siren-speaker.js';
 import type { ZoneType } from './types.js';
+import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
 
 interface ZoneConfig {
   zone: number;
@@ -18,6 +20,7 @@ interface ZoneConfig {
 }
 
 const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
+const DEFAULT_SIREN_NAME = 'Alarm Siren';
 
 interface PartitionConfigEntry {
   id: number;
@@ -26,24 +29,33 @@ interface PartitionConfigEntry {
   zones?: ZoneConfig[];
 }
 
+interface SirenConfig {
+  enabled?: boolean;
+  name?: string;
+}
+
 interface PimaForcePlatformConfig extends PlatformConfig {
   port?: number;
   account?: number;
   partitions?: PartitionConfigEntry[];
+  siren?: SirenConfig;
 }
 
-type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext;
+type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
 
 export class PimaForcePlatform implements DynamicPlatformPlugin {
   public readonly driver: PimaDriver;
 
   /** Accessories restored from the cache by Homebridge between launches. */
   private readonly cachedAccessories = new Map<string, PlatformAccessory<AnyContext>>();
-  private readonly partitions = new Map<number, PartitionSwitch>();
+  private readonly partitions = new Map<number, PartitionSecuritySystem>();
   private readonly zones = new Map<number, ZoneSensor>();
+  /** Output number → accessory (e.g., 1 = external siren). */
+  private readonly sirens = new Map<number, SirenSpeaker>();
   /** Track ids we've already info-logged so we don't spam on every event. */
   private readonly seenUnknownPartitions = new Set<number>();
   private readonly seenUnknownZones = new Set<number>();
+  private readonly seenUnknownOutputs = new Set<number>();
 
   constructor(
     public readonly log: Logger,
@@ -92,6 +104,24 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         this.noteUnknownZone(zone, partition, active);
       }
     });
+    this.driver.on('output', ({ output, partition, active }) => {
+      const acc = this.sirens.get(output);
+      if (acc) {
+        log.info(`output ${output} (partition ${partition}) → ${active ? 'ACTIVE' : 'inactive'}`);
+        acc.setSounding(active);
+      } else {
+        this.noteUnknownOutput(output, partition, active);
+      }
+    });
+    this.driver.on('alarm', ({ zone, partition, active }) => {
+      const acc = this.partitions.get(partition);
+      if (acc) {
+        log.warn(`partition ${partition} ${active ? 'ALARM TRIGGERED' : 'alarm restored'} (zone ${zone})`);
+        acc.setAlarmTriggered(active);
+      } else {
+        this.noteUnknownPartition(partition, `alarm zone ${zone} ${active ? 'triggered' : 'restored'}`);
+      }
+    });
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
@@ -115,7 +145,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       return;
     }
     this.seenUnknownPartitions.add(id);
-    this.log.info(`received ${what} for unconfigured partition ${id} — add it to plugin config to expose as a HomeKit switch`);
+    this.log.info(`received ${what} for unconfigured partition ${id} — add it to plugin config to expose as a HomeKit security system`);
   }
 
   private noteUnknownZone(zone: number, partition: number, active: boolean): void {
@@ -128,6 +158,16 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.log.info(`received zone event ${zone} (partition ${partition}) → ${state} for unconfigured zone — add it to plugin config to expose as a HomeKit sensor`);
   }
 
+  private noteUnknownOutput(output: number, partition: number, active: boolean): void {
+    const state = active ? 'active' : 'inactive';
+    if (this.seenUnknownOutputs.has(output)) {
+      this.log.debug(`output ${output} (partition ${partition}) → ${state}; unconfigured`);
+      return;
+    }
+    this.seenUnknownOutputs.add(output);
+    this.log.info(`received output event ${output} (partition ${partition}) → ${state}; no HomeKit accessory exposed for this output`);
+  }
+
   private discoverDevices(): void {
     const partitions = this.config.partitions ?? [];
     const desiredUuids = new Set<string>();
@@ -137,6 +177,13 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       for (const zoneConfig of partConfig.zones ?? []) {
         desiredUuids.add(this.registerZone(partConfig.id, zoneConfig));
       }
+    }
+
+    // Optional global siren accessory (single instance, output 1 by default).
+    const sirenCfg = this.config.siren ?? {};
+    const sirenEnabled = sirenCfg.enabled !== false; // default on
+    if (sirenEnabled && partitions.length > 0) {
+      desiredUuids.add(this.registerSiren(sirenCfg.name ?? DEFAULT_SIREN_NAME));
     }
 
     // Unregister any cached accessories no longer in config.
@@ -156,7 +203,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   }
 
   private registerPartition(p: PartitionConfigEntry): string {
-    const uuid = this.api.hap.uuid.generate(`pima-force:partition:${p.id}`);
+    // UUID prefix changed from `pima-force:partition` (Switch) to
+    // `pima-force:security-system:` to ensure HomeKit treats this as a new
+    // accessory after the v0.1 → v0.2 migration. The old Switch accessory
+    // becomes stale and is removed by the cleanup pass.
+    const uuid = this.api.hap.uuid.generate(`pima-force:security-system:${p.id}`);
     const ctx: PartitionAccessoryContext = { kind: 'partition', id: p.id, name: p.name };
     let accessory = this.cachedAccessories.get(uuid) as
       | PlatformAccessory<PartitionAccessoryContext>
@@ -169,9 +220,9 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       accessory.context = ctx;
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
-      this.log.info(`registered partition switch: ${p.name} (id ${p.id})`);
+      this.log.info(`registered partition security system: ${p.name} (id ${p.id})`);
     }
-    this.partitions.set(p.id, new PartitionSwitch(this, accessory));
+    this.partitions.set(p.id, new PartitionSecuritySystem(this, accessory));
     return uuid;
   }
 
@@ -198,6 +249,27 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       this.log.info(`registered zone sensor: ${z.name} (zone ${z.zone}, partition ${partitionId})`);
     }
     this.zones.set(z.zone, new ZoneSensor(this, accessory));
+    return uuid;
+  }
+
+  private registerSiren(name: string): string {
+    const output = OUTPUT_EXTERNAL_SIREN;
+    const uuid = this.api.hap.uuid.generate(`pima-force:siren:${output}`);
+    const ctx: SirenAccessoryContext = { kind: 'siren', output, name };
+    let accessory = this.cachedAccessories.get(uuid) as
+      | PlatformAccessory<SirenAccessoryContext>
+      | undefined;
+    if (accessory) {
+      accessory.context = ctx;
+      accessory.displayName = name;
+    } else {
+      accessory = new this.api.platformAccessory<SirenAccessoryContext>(name, uuid);
+      accessory.context = ctx;
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
+      this.log.info(`registered siren speaker: ${name} (output ${output})`);
+    }
+    this.sirens.set(output, new SirenSpeaker(this, accessory));
     return uuid;
   }
 }

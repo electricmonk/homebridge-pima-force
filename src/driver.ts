@@ -3,11 +3,20 @@ import net from 'node:net';
 import {
   buildAck,
   buildOperation,
+  EVENT_TYPE_BURGLARY,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
+  EVENT_TYPE_OUTPUT,
   EVENT_TYPE_REMOTE_ARM,
   EVENT_TYPE_ZONE,
-  OPTYPE_ARM,
+  OPTYPE_ACTIVATE_OUTPUT,
+  OPTYPE_ARM_AWAY,
+  OPTYPE_ARM_HOME1,
+  OPTYPE_ARM_HOME2,
+  OPTYPE_ARM_HOME3,
+  OPTYPE_ARM_HOME4,
+  OPTYPE_ARM_SHABBAT,
+  OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
   parseFrames,
   QUALIFIER_NEW,
@@ -16,11 +25,21 @@ import {
 } from './protocol.js';
 import type {
   ArmEventSource,
+  ArmMode,
   PanelFrame,
   PartitionConfig,
   PimaDriverConfig,
   PimaDriverEvents,
 } from './types.js';
+
+const ARM_MODE_TO_OPTYPE: Record<ArmMode, number> = {
+  away:    OPTYPE_ARM_AWAY,
+  home1:   OPTYPE_ARM_HOME1,
+  home2:   OPTYPE_ARM_HOME2,
+  home3:   OPTYPE_ARM_HOME3,
+  home4:   OPTYPE_ARM_HOME4,
+  shabbat: OPTYPE_ARM_SHABBAT,
+};
 
 /**
  * Driver for the Pima FORCE alarm panel local CMS protocol.
@@ -72,12 +91,49 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.activeSocket !== null && !this.activeSocket.destroyed;
   }
 
-  arm(partition: number): Promise<void> {
-    return this.sendOperation(OPTYPE_ARM, partition);
+  /**
+   * Arm a partition. Defaults to AWAY (full arm). Panel-recognized modes
+   * are mapped per Appendix B of the Force JSON spec.
+   */
+  arm(partition: number, mode: ArmMode = 'away'): Promise<void> {
+    const optype = ARM_MODE_TO_OPTYPE[mode];
+    if (optype === undefined) {
+      return Promise.reject(new Error(`unknown arm mode: ${mode}`));
+    }
+    return this.sendOperation(optype, partition);
   }
 
   disarm(partition: number): Promise<void> {
     return this.sendOperation(OPTYPE_DISARM, partition);
+  }
+
+  /**
+   * Activate or de-activate a panel output. Output 1 = external siren,
+   * 2 = internal siren, 34-41 = controlled outputs 1-8 (Appendix B).
+   *
+   * The OPERATION partition field is 0 (panel-wide). The user code from
+   * the first configured partition is used to authorize.
+   */
+  setOutput(output: number, active: boolean): Promise<void> {
+    const part = this.config.partitions[0];
+    if (!part) {
+      return Promise.reject(new Error('no partition configured to derive a user code for output operation'));
+    }
+    return new Promise((resolve, reject) => {
+      const sock = this.activeSocket;
+      if (!sock || sock.destroyed) {
+        return reject(new Error('no active panel connection'));
+      }
+      const frame = buildOperation({
+        account: this.config.account,
+        counter: this.opCounter++,
+        optype: active ? OPTYPE_ACTIVATE_OUTPUT : OPTYPE_DEACTIVATE_OUTPUT,
+        partition: 0,
+        order: output,
+        password: part.userCode,
+      });
+      sock.write(frame, (err) => (err ? reject(err) : resolve()));
+    });
   }
 
   private sendOperation(optype: number, partition: number): Promise<void> {
@@ -190,6 +246,23 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
         channel: Number(frame.zone ?? 0),
         partition,
       });
+      return;
+    }
+
+    if (type === EVENT_TYPE_OUTPUT) {
+      // For type 770 the `zone` field carries the output number (Appendix A).
+      const output = Number(frame.zone ?? 0);
+      if (!output) {
+        this.emit('unknown', frame);
+        return;
+      }
+      this.emit('output', { output, partition, active: qualifier === QUALIFIER_NEW });
+      return;
+    }
+
+    if (type === EVENT_TYPE_BURGLARY) {
+      const zone = Number(frame.zone ?? 0);
+      this.emit('alarm', { zone, partition, active: qualifier === QUALIFIER_NEW });
       return;
     }
 
