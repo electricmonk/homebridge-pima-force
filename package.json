@@ -1,7 +1,7 @@
 {
   "name": "homebridge-pima-force",
   "displayName": "Pima FORCE",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Homebridge plugin for the Pima FORCE alarm panel via local CMS protocol over TCP/JSON",
   "type": "module",
   "author": {
