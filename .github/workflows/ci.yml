@@ -10,9 +10,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 # Cancel older runs on the same ref when a new one starts.
 concurrency:
@@ -44,11 +44,11 @@ jobs:
 
   release:
     name: Bump and publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      # Push the version bump + tag back to main.
+      # Push the version bump + tag back to master.
       contents: write
       # Required for npm provenance + Trusted Publisher OIDC token exchange.
       id-token: write
