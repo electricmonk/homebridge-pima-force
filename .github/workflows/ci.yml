@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.x', '22.x']
+        node-version: ['22.x', '24.x']
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +64,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          # Use current LTS for publish (this job doesn't run user code) so
+          # we get an npm CLI new enough for Trusted Publishing — TP needs
+          # npm 11.5+. The test job still exercises Node 20 to honor
+          # package.json `engines.node: ">=20"`.
+          node-version: '24.x'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
 
