@@ -4,6 +4,18 @@
   "version": "0.1.0",
   "description": "Homebridge plugin for the Pima FORCE alarm panel via local CMS protocol over TCP/JSON",
   "type": "module",
+  "author": {
+    "name": "Shai Yallin",
+    "email": "shai.yallin@gmail.com",
+    "url": "https://github.com/electricmonk"
+  },
+  "contributors": [
+    {"name":"Claude Code", "url": "https://claude.ai"}
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/electricmonk/homebridge-pima-force"
+  },
   "main": "dist/index.js",
   "files": [
     "dist",
