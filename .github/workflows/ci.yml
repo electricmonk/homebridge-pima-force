@@ -1,7 +1,7 @@
 name: CI
 
-# CI runs on every push and PR. The release job runs only on pushes to main:
-# it patch-bumps the version, commits + tags back to main with [skip ci],
+# CI runs on every push and PR. The release job runs only on pushes to master:
+# it patch-bumps the version, commits + tags back to master with [skip ci],
 # and publishes to npm via the GitHub Trusted Publisher (OIDC) flow.
 #
 # No NPM_TOKEN secret is required — the GitHub OIDC token is exchanged for
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.x', '22.x']
+        node-version: ['22.x', '24.x']
     steps:
       - uses: actions/checkout@v4
 
@@ -58,13 +58,17 @@ jobs:
           # Full history so npm version can compute correctly relative to tags.
           fetch-depth: 0
           # Use the default GITHUB_TOKEN; `contents: write` lets us push.
-          # If main has branch protection that blocks bot pushes, allow
+          # If master has branch protection that blocks bot pushes, allow
           # github-actions[bot] to bypass it (Settings → Branches → Rule).
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          # Use current LTS for publish (this job doesn't run user code) so
+          # we get an npm CLI new enough for Trusted Publishing — TP needs
+          # npm 11.5+. The test job still exercises Node 20 to honor
+          # package.json `engines.node: ">=20"`.
+          node-version: '24.x'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
 
@@ -85,12 +89,27 @@ jobs:
           git add package.json package-lock.json
           git commit -m "chore(release): $new_version [skip ci]"
           git tag -a "$new_version" -m "$new_version"
-          git push origin HEAD:main
+          git push origin HEAD:master
           git push origin "$new_version"
           echo "Released $new_version"
 
       - name: Build
         run: npm run build
+
+      - name: Debug OIDC claims (compare against npm TP config)
+        # ACTIONS_ID_TOKEN_REQUEST_TOKEN/URL are auto-provided because the
+        # job has `id-token: write`. Decoding the JWT payload reveals the
+        # claims (repository, workflow_ref, sub, environment, ...) that
+        # npm's Trusted Publisher matches against — useful when publish
+        # fails with a misleading 404.
+        run: |
+          token=$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
+            | python3 -c 'import sys, json; print(json.load(sys.stdin)["value"])')
+          payload=$(echo "$token" | cut -d. -f2)
+          pad=$((4 - ${#payload} % 4)); [ $pad -lt 4 ] && payload="$payload$(printf '=%.0s' $(seq 1 $pad))"
+          echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool
 
       - name: Publish to npm with provenance (OIDC)
         # No NODE_AUTH_TOKEN env: with `id-token: write` and a Trusted
