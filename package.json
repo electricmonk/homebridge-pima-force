@@ -10,11 +10,14 @@
     "url": "https://github.com/electricmonk"
   },
   "contributors": [
-    {"name":"Claude Code", "url": "https://claude.ai"}
+    {
+      "name": "Claude Code",
+      "url": "https://claude.ai"
+    }
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/electricmonk/homebridge-pima-force"
+    "url": "git+https://github.com/electricmonk/homebridge-pima-force.git"
   },
   "main": "dist/index.js",
   "files": [
