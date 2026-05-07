@@ -37,7 +37,9 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   private readonly cachedAccessories = new Map<string, PlatformAccessory<AnyContext>>();
   private readonly partitions = new Map<number, PartitionSwitch>();
   private readonly zones = new Map<number, ZoneSensor>();
-  /** Partition number → set of zone numbers belonging to it (used to scope arm-state pushes if ever needed). */
+  /** Track ids we've already info-logged so we don't spam on every event. */
+  private readonly seenUnknownPartitions = new Set<number>();
+  private readonly seenUnknownZones = new Set<number>();
 
   constructor(
     public readonly log: Logger,
@@ -60,16 +62,31 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
 
     this.driver.on('arm', ({ partition, source }) => {
-      log.info(`partition ${partition} ARMED (source: ${source})`);
-      this.partitions.get(partition)?.setArmedFromPanel(true);
+      const acc = this.partitions.get(partition);
+      if (acc) {
+        log.info(`partition ${partition} ARMED (source: ${source})`);
+        acc.setArmedFromPanel(true);
+      } else {
+        this.noteUnknownPartition(partition, `arm (source: ${source})`);
+      }
     });
     this.driver.on('disarm', ({ partition, source }) => {
-      log.info(`partition ${partition} DISARMED (source: ${source})`);
-      this.partitions.get(partition)?.setArmedFromPanel(false);
+      const acc = this.partitions.get(partition);
+      if (acc) {
+        log.info(`partition ${partition} DISARMED (source: ${source})`);
+        acc.setArmedFromPanel(false);
+      } else {
+        this.noteUnknownPartition(partition, `disarm (source: ${source})`);
+      }
     });
     this.driver.on('zone', ({ zone, partition, active }) => {
-      log.debug(`zone ${zone} (partition ${partition}) → ${active ? 'active' : 'restored'}`);
-      this.zones.get(zone)?.setActive(active);
+      const acc = this.zones.get(zone);
+      if (acc) {
+        log.debug(`zone ${zone} (partition ${partition}) → ${active ? 'active' : 'restored'}`);
+        acc.setActive(active);
+      } else {
+        this.noteUnknownZone(zone, partition, active);
+      }
     });
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
@@ -86,6 +103,25 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
   configureAccessory(accessory: PlatformAccessory<AnyContext>): void {
     this.cachedAccessories.set(accessory.UUID, accessory);
+  }
+
+  private noteUnknownPartition(id: number, what: string): void {
+    if (this.seenUnknownPartitions.has(id)) {
+      this.log.debug(`${what} for unconfigured partition ${id}`);
+      return;
+    }
+    this.seenUnknownPartitions.add(id);
+    this.log.info(`received ${what} for unconfigured partition ${id} — add it to plugin config to expose as a HomeKit switch`);
+  }
+
+  private noteUnknownZone(zone: number, partition: number, active: boolean): void {
+    const state = active ? 'active' : 'restored';
+    if (this.seenUnknownZones.has(zone)) {
+      this.log.debug(`zone ${zone} (partition ${partition}) → ${state}; unconfigured`);
+      return;
+    }
+    this.seenUnknownZones.add(zone);
+    this.log.info(`received zone event ${zone} (partition ${partition}) → ${state} for unconfigured zone — add it to plugin config to expose as a HomeKit sensor`);
   }
 
   private discoverDevices(): void {

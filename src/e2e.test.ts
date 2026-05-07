@@ -16,7 +16,7 @@
 import { strict as assert } from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,6 +94,8 @@ interface E2EFixture {
   token: string;
   api<T = unknown>(method: string, path: string, body?: unknown): Promise<T>;
   connectAlarm(): Promise<FakeAlarm>;
+  /** Snapshot of all stdout+stderr written by the homebridge subprocess. */
+  logs(): string;
   stop(): Promise<void>;
 }
 
@@ -239,7 +241,14 @@ async function setupE2E(): Promise<E2EFixture> {
     sock.once('error', reject);
   });
 
-  return { uiPort, alarmPort, account, storage, token, api, connectAlarm, stop };
+  // hb-service redirects the homebridge child's logs to a file in storage;
+  // the supervisor's own stdout only contains startup banners. Read both.
+  const logs = (): string => {
+    let fileLog = '';
+    try { fileLog = readFileSync(join(storage, 'homebridge.log'), 'utf8'); } catch { /* not yet created */ }
+    return logBuf + '\n' + fileLog;
+  };
+  return { uiPort, alarmPort, account, storage, token, api, connectAlarm, logs, stop };
 }
 
 interface AccessorySnapshot extends AccessoryService {
@@ -421,6 +430,120 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       assert.equal(op.partition, 2);
       assert.equal(op.password, '0000');
       assert.equal(op.account, fix.account);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('zone event for unconfigured zone is logged once at INFO and does not crash', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 50, account: String(fix.account) });
+      await alarm.waitForRx(1);
+
+      const accessoriesBefore = (await listAccessories(fix)).length;
+
+      // Zone 99 is not in our config.
+      alarm.send({
+        frame_type: 'event',
+        counter: 51,
+        account: String(fix.account),
+        type: 760,
+        qualifier: 1,
+        zone: 99,
+        partition: 2,
+      });
+      // Send same unknown zone again — should NOT generate a second info log.
+      alarm.send({
+        frame_type: 'event',
+        counter: 52,
+        account: String(fix.account),
+        type: 760,
+        qualifier: 3,
+        zone: 99,
+        partition: 2,
+      });
+
+      // Give the subprocess a moment to receive + log.
+      await new Promise((r) => setTimeout(r, 300));
+
+      // No new accessories were registered.
+      const accessoriesAfter = await listAccessories(fix);
+      assert.equal(accessoriesAfter.length, accessoriesBefore);
+
+      // Logs contain exactly one INFO line for unconfigured zone 99.
+      const logs = fix.logs();
+      const infoLines = logs.split('\n').filter((l) => l.includes('unconfigured zone') && l.includes('99'));
+      assert.equal(
+        infoLines.filter((l) => !l.includes('debug')).length >= 1,
+        true,
+        `expected at least one info-level log mentioning unconfigured zone 99, got:\n${infoLines.join('\n')}`,
+      );
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('arm event for unconfigured partition is logged at INFO and does not crash', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 60, account: String(fix.account) });
+      await alarm.waitForRx(1);
+
+      // Partition 7 is not in our config.
+      alarm.send({
+        frame_type: 'event',
+        counter: 61,
+        account: String(fix.account),
+        type: 407,
+        qualifier: 3,
+        zone: 1,
+        partition: 7,
+      });
+
+      await new Promise((r) => setTimeout(r, 300));
+
+      // Existing partition 2 switch is unaffected.
+      const acc = await findAccessoryByName(fix, 'E2E Partition');
+      assert.notEqual(acc, undefined);
+
+      const logs = fix.logs();
+      const found = logs.includes('unconfigured partition 7');
+      assert.ok(found, `expected log to mention unconfigured partition 7, got tail:\n${logs.split('\n').slice(-30).join('\n')}`);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('valid event still works after an unconfigured one', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 70, account: String(fix.account) });
+      await alarm.waitForRx(1);
+
+      // First, an unknown zone (should be ignored gracefully).
+      alarm.send({
+        frame_type: 'event',
+        counter: 71,
+        account: String(fix.account),
+        type: 760,
+        qualifier: 1,
+        zone: 88,
+        partition: 2,
+      });
+      // Then a valid zone event for our configured zone 3 (motion).
+      alarm.send({
+        frame_type: 'event',
+        counter: 72,
+        account: String(fix.account),
+        type: 760,
+        qualifier: 1,
+        zone: 3,
+        partition: 2,
+      });
+
+      const acc = await waitForAccessoryState(fix, 'E2E Motion', (a) => a.values.ContactSensorState === 1);
+      assert.equal(acc.values.ContactSensorState, 1);
     } finally {
       alarm.close();
     }
