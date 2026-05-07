@@ -1,0 +1,89 @@
+name: CI
+
+# CI runs on every push and PR. Publish runs only when a version tag (v*) is
+# pushed AND the test job passed.
+#
+# Required repo secret for publishing:
+#   NPM_TOKEN — npm "Automation" token with publish access for the package.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# Cancel older runs on the same ref when a new one starts.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20.x', '22.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build (typecheck + emit dist)
+        run: npm run build
+
+      - name: Unit tests (protocol)
+        run: npm run test:unit
+
+      - name: Integration tests (mock alarm)
+        run: npm run test:integration
+
+      - name: E2E tests (UI ↔ TCP roundtrip)
+        run: npm run test:e2e
+
+  publish:
+    name: Publish to npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance attestations.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - name: Verify package.json version matches the tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg_version"
+            exit 1
+          fi
+          echo "Publishing version $pkg_version"
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

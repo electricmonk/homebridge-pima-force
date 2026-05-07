@@ -18,8 +18,6 @@
         "type": "integer",
         "required": true,
         "default": 7780,
-        "minimum": 1,
-        "maximum": 65535,
         "description": "Port the alarm panel will dial in to. Must match the CMS path port configured on the panel."
       },
       "account": {
@@ -41,7 +39,6 @@
               "type": "integer",
               "required": true,
               "minimum": 1,
-              "maximum": 16,
               "description": "Partition number on the panel (1-16)."
             },
             "name": {
