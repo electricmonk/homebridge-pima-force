@@ -1,0 +1,198 @@
+import { EventEmitter } from 'node:events';
+import net from 'node:net';
+import {
+  buildAck,
+  buildOperation,
+  EVENT_TYPE_COMM,
+  EVENT_TYPE_LOCAL_ARM,
+  EVENT_TYPE_REMOTE_ARM,
+  EVENT_TYPE_ZONE,
+  OPTYPE_ARM,
+  OPTYPE_DISARM,
+  parseFrames,
+  QUALIFIER_NEW,
+  QUALIFIER_RESTORE,
+  shouldAck,
+} from './protocol.js';
+import type {
+  ArmEventSource,
+  PanelFrame,
+  PartitionConfig,
+  PimaDriverConfig,
+  PimaDriverEvents,
+} from './types.js';
+
+/**
+ * Driver for the Pima FORCE alarm panel local CMS protocol.
+ *
+ * Architecturally inverted: the panel is the TCP client and dials *out*
+ * to us. We act as the CMS receiver. We can issue OPERATION commands
+ * (arm/disarm) only while a panel-initiated connection is live.
+ */
+export class PimaDriver extends EventEmitter<PimaDriverEvents> {
+  private readonly config: PimaDriverConfig;
+  private readonly partitionByCode: Map<number, PartitionConfig>;
+  private server: net.Server | null = null;
+  private activeSocket: net.Socket | null = null;
+  private opCounter: number;
+
+  constructor(config: PimaDriverConfig) {
+    super();
+    this.config = config;
+    this.partitionByCode = new Map(config.partitions.map((p) => [p.id, p]));
+    this.opCounter = config.opCounterStart ?? 5000;
+  }
+
+  start(): Promise<void> {
+    if (this.server) throw new Error('driver already started');
+    return new Promise((resolve, reject) => {
+      const server = net.createServer((sock) => this.handleConnection(sock));
+      server.once('error', reject);
+      server.listen(this.config.port, () => {
+        server.removeListener('error', reject);
+        this.server = server;
+        resolve();
+      });
+    });
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve) => {
+      this.activeSocket?.destroy();
+      this.activeSocket = null;
+      if (!this.server) return resolve();
+      this.server.close(() => {
+        this.server = null;
+        resolve();
+      });
+    });
+  }
+
+  isConnected(): boolean {
+    return this.activeSocket !== null && !this.activeSocket.destroyed;
+  }
+
+  arm(partition: number): Promise<void> {
+    return this.sendOperation(OPTYPE_ARM, partition);
+  }
+
+  disarm(partition: number): Promise<void> {
+    return this.sendOperation(OPTYPE_DISARM, partition);
+  }
+
+  private sendOperation(optype: number, partition: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const sock = this.activeSocket;
+      if (!sock || sock.destroyed) {
+        return reject(new Error('no active panel connection'));
+      }
+      const part = this.partitionByCode.get(partition);
+      if (!part) {
+        return reject(new Error(`partition ${partition} not configured`));
+      }
+      const frame = buildOperation({
+        account: this.config.account,
+        counter: this.opCounter++,
+        optype,
+        partition,
+        password: part.userCode,
+      });
+      sock.write(frame, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  private handleConnection(sock: net.Socket): void {
+    // The panel only opens one connection at a time per CMS path. If a new
+    // one arrives while we still have an old socket reference, drop the old.
+    if (this.activeSocket && !this.activeSocket.destroyed) {
+      this.activeSocket.destroy();
+    }
+    this.activeSocket = sock;
+    this.emit('connected');
+
+    sock.on('data', (buf) => this.handleData(sock, buf));
+    sock.on('error', (err) => this.emit('error', err));
+    sock.on('close', () => {
+      if (this.activeSocket === sock) {
+        this.activeSocket = null;
+        this.emit('disconnected');
+      }
+    });
+  }
+
+  private handleData(sock: net.Socket, buf: Buffer): void {
+    // TCP can coalesce back-to-back writes into one data event, so handle
+    // multiple frames per chunk. We don't currently buffer across chunks
+    // (a frame split across two TCP segments would be lost) — this hasn't
+    // been observed in practice on a LAN with the panel.
+    for (const frame of parseFrames(buf)) {
+      if (shouldAck(frame)) {
+        sock.write(buildAck(frame));
+      }
+      this.dispatch(frame);
+    }
+  }
+
+  private dispatch(frame: PanelFrame): void {
+    const t = frame.frame_type;
+    if (t === 'null' || t === 'ACK' || t === 'NAK') return; // control frames
+
+    if (t === 'event') {
+      this.dispatchEvent(frame);
+      return;
+    }
+
+    this.emit('unknown', frame);
+  }
+
+  private dispatchEvent(frame: PanelFrame): void {
+    const partition = Number(frame.partition ?? 0);
+    if (!partition) {
+      this.emit('unknown', frame);
+      return;
+    }
+
+    const type = Number(frame.type ?? 0);
+    const qualifier = Number(frame.qualifier ?? 0);
+
+    if (type === EVENT_TYPE_ZONE) {
+      const zone = Number(frame.zone ?? 0);
+      if (!zone) {
+        this.emit('unknown', frame);
+        return;
+      }
+      this.emit('zone', {
+        zone,
+        partition,
+        active: qualifier === QUALIFIER_NEW,
+      });
+      return;
+    }
+
+    if (type === EVENT_TYPE_REMOTE_ARM || type === EVENT_TYPE_LOCAL_ARM) {
+      const source: ArmEventSource =
+        type === EVENT_TYPE_REMOTE_ARM ? 'remote' : 'local';
+      // qualifier 3 = restore = ARMED (closed); qualifier 1 = new event = DISARMED (opened)
+      if (qualifier === QUALIFIER_RESTORE) {
+        this.emit('arm', { partition, source });
+      } else if (qualifier === QUALIFIER_NEW) {
+        this.emit('disarm', { partition, source });
+      } else {
+        this.emit('unknown', frame);
+      }
+      return;
+    }
+
+    if (type === EVENT_TYPE_COMM) {
+      this.emit('system', {
+        kind: 'commPath',
+        ok: qualifier === QUALIFIER_RESTORE,
+        channel: Number(frame.zone ?? 0),
+        partition,
+      });
+      return;
+    }
+
+    this.emit('unknown', frame);
+  }
+}

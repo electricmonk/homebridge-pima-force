@@ -1,0 +1,33 @@
+{
+  "name": "pima-force-driver",
+  "version": "0.1.0",
+  "description": "Driver for Pima FORCE alarm panel local CMS protocol over TCP/JSON",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "cli": "tsx src/cli.ts",
+    "test": "node --import tsx --test src/*.test.ts",
+    "test:unit": "node --import tsx --test src/protocol.test.ts",
+    "test:integration": "node --import tsx --test src/driver.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
