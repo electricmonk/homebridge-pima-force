@@ -1,15 +1,16 @@
 name: CI
 
-# CI runs on every push and PR. Publish runs only when a version tag (v*) is
-# pushed AND the test job passed.
+# CI runs on every push and PR. The release job runs only on pushes to main:
+# it patch-bumps the version, commits + tags back to main with [skip ci],
+# and publishes to npm via the GitHub Trusted Publisher (OIDC) flow.
 #
-# Required repo secret for publishing:
-#   NPM_TOKEN — npm "Automation" token with publish access for the package.
+# No NPM_TOKEN secret is required — the GitHub OIDC token is exchanged for
+# an npm publish token automatically when `npm publish --provenance` runs
+# in a workflow that has `id-token: write` permission.
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -36,30 +37,29 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
+      - run: npm run build
+      - run: npm run test:unit
+      - run: npm run test:integration
+      - run: npm run test:e2e
 
-      - name: Build (typecheck + emit dist)
-        run: npm run build
-
-      - name: Unit tests (protocol)
-        run: npm run test:unit
-
-      - name: Integration tests (mock alarm)
-        run: npm run test:integration
-
-      - name: E2E tests (UI ↔ TCP roundtrip)
-        run: npm run test:e2e
-
-  publish:
-    name: Publish to npm
-    if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    name: Bump and publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      # Required for npm provenance attestations.
+      # Push the version bump + tag back to main.
+      contents: write
+      # Required for npm provenance + Trusted Publisher OIDC token exchange.
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so npm version can compute correctly relative to tags.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN; `contents: write` lets us push.
+          # If main has branch protection that blocks bot pushes, allow
+          # github-actions[bot] to bypass it (Settings → Branches → Rule).
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -70,20 +70,31 @@ jobs:
 
       - run: npm ci
 
-      - name: Verify package.json version matches the tag
+      - name: Configure git for the bump commit
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          pkg_version="$(node -p "require('./package.json').version")"
-          if [ "$tag_version" != "$pkg_version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg_version"
-            exit 1
-          fi
-          echo "Publishing version $pkg_version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump patch, commit, tag
+        id: bump
+        run: |
+          # --no-git-tag-version: don't auto-commit/tag; we do it ourselves
+          # so we can include [skip ci] and push commit + tag in one shot.
+          new_version=$(npm version patch --no-git-tag-version)
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          git add package.json package-lock.json
+          git commit -m "chore(release): $new_version [skip ci]"
+          git tag -a "$new_version" -m "$new_version"
+          git push origin HEAD:main
+          git push origin "$new_version"
+          echo "Released $new_version"
 
       - name: Build
         run: npm run build
 
-      - name: Publish to npm with provenance
+      - name: Publish to npm with provenance (OIDC)
+        # No NODE_AUTH_TOKEN env: with `id-token: write` and a Trusted
+        # Publisher configured on npm for this repo, the npm CLI exchanges
+        # the GitHub OIDC token for a short-lived publish token at the
+        # registry. --provenance attaches a verifiable build attestation.
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
