@@ -138,8 +138,10 @@ async function setupE2E(): Promise<E2EFixture> {
             name: 'E2E Partition',
             userCode: '0000',
             zones: [
-              { zone: 3, name: 'E2E Motion' },
-              { zone: 4, name: 'E2E Door' },
+              { zone: 3, name: 'E2E Motion', type: 'motion' },
+              { zone: 4, name: 'E2E Door', type: 'contact' },
+              { zone: 5, name: 'E2E Leak', type: 'leak' },
+              { zone: 6, name: 'E2E Smoke', type: 'smoke' },
             ],
           },
         ],
@@ -321,16 +323,25 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     // Bridge accessory + plugin accessories take a moment to appear in the
     // UI's data layer after startup (HAP IPC bring-up). Don't start asserting
     // until they're all visible.
-    await waitForAccessories(fix, ['E2E Partition', 'E2E Motion', 'E2E Door']);
+    await waitForAccessories(fix, ['E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke']);
   });
   after(async () => { await fix?.stop(); });
 
   it('all configured accessories appear in the UI', async () => {
     const list = await listAccessories(fix);
     const names = new Set(list.map((a) => a.serviceName));
-    for (const expected of ['E2E Partition', 'E2E Motion', 'E2E Door']) {
+    for (const expected of ['E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke']) {
       assert.ok(names.has(expected), `expected accessory "${expected}" in ${[...names].join(', ')}`);
     }
+  });
+
+  it('zone types map to the right HAP service per the dropdown', async () => {
+    const list = await listAccessories(fix);
+    const byName = new Map(list.map((a) => [a.serviceName, a]));
+    assert.equal(byName.get('E2E Door')?.type, 'ContactSensor');
+    assert.equal(byName.get('E2E Motion')?.type, 'MotionSensor');
+    assert.equal(byName.get('E2E Leak')?.type, 'LeakSensor');
+    assert.equal(byName.get('E2E Smoke')?.type, 'SmokeSensor');
   });
 
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
@@ -531,7 +542,7 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         zone: 88,
         partition: 2,
       });
-      // Then a valid zone event for our configured zone 3 (motion).
+      // Then a valid zone event for our configured zone 3 (motion sensor).
       alarm.send({
         frame_type: 'event',
         counter: 72,
@@ -542,8 +553,53 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         partition: 2,
       });
 
-      const acc = await waitForAccessoryState(fix, 'E2E Motion', (a) => a.values.ContactSensorState === 1);
-      assert.equal(acc.values.ContactSensorState, 1);
+      const acc = await waitForAccessoryState(fix, 'E2E Motion', (a) => Boolean(a.values.MotionDetected));
+      assert.ok(Boolean(acc.values.MotionDetected));
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('motion zone event flips MotionDetected true/false', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 80, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // Active
+      alarm.send({ frame_type: 'event', counter: 81, account: String(fix.account), type: 760, qualifier: 1, zone: 3, partition: 2 });
+      await waitForAccessoryState(fix, 'E2E Motion', (a) => Boolean(a.values.MotionDetected));
+      // Restore
+      alarm.send({ frame_type: 'event', counter: 82, account: String(fix.account), type: 760, qualifier: 3, zone: 3, partition: 2 });
+      await waitForAccessoryState(fix, 'E2E Motion', (a) => !a.values.MotionDetected);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('leak zone event flips LeakDetected', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 90, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      alarm.send({ frame_type: 'event', counter: 91, account: String(fix.account), type: 760, qualifier: 1, zone: 5, partition: 2 });
+      // LeakDetected: 1 = LEAK_DETECTED, 0 = LEAK_NOT_DETECTED
+      await waitForAccessoryState(fix, 'E2E Leak', (a) => a.values.LeakDetected === 1);
+      alarm.send({ frame_type: 'event', counter: 92, account: String(fix.account), type: 760, qualifier: 3, zone: 5, partition: 2 });
+      await waitForAccessoryState(fix, 'E2E Leak', (a) => a.values.LeakDetected === 0);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('smoke zone event flips SmokeDetected', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 100, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      alarm.send({ frame_type: 'event', counter: 101, account: String(fix.account), type: 760, qualifier: 1, zone: 6, partition: 2 });
+      await waitForAccessoryState(fix, 'E2E Smoke', (a) => a.values.SmokeDetected === 1);
+      alarm.send({ frame_type: 'event', counter: 102, account: String(fix.account), type: 760, qualifier: 3, zone: 6, partition: 2 });
+      await waitForAccessoryState(fix, 'E2E Smoke', (a) => a.values.SmokeDetected === 0);
     } finally {
       alarm.close();
     }

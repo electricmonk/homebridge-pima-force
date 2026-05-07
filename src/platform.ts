@@ -9,11 +9,15 @@ import { PimaDriver } from './driver.js';
 import { PartitionSwitch, type PartitionAccessoryContext } from './partition-switch.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
+import type { ZoneType } from './types.js';
 
 interface ZoneConfig {
   zone: number;
   name: string;
+  type?: ZoneType;
 }
+
+const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
 
 interface PartitionConfigEntry {
   id: number;
@@ -178,6 +182,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       zone: z.zone,
       partition: partitionId,
       name: z.name,
+      type: z.type ?? DEFAULT_ZONE_TYPE,
     };
     let accessory = this.cachedAccessories.get(uuid) as
       | PlatformAccessory<ZoneAccessoryContext>

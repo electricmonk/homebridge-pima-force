@@ -3,6 +3,15 @@ export interface PartitionConfig {
   userCode: string;
 }
 
+/**
+ * The HomeKit sensor type a zone should be exposed as. Maps to a specific
+ * HAP service + characteristic in the plugin's accessory layer. All types
+ * share the same active/inactive panel-side semantics (qualifier 1/3) — the
+ * difference is only how HomeKit presents the sensor (icon, automation
+ * primitives, voice queries).
+ */
+export type ZoneType = 'contact' | 'motion' | 'leak' | 'smoke';
+
 export interface PimaDriverConfig {
   port: number;
   account: number;
