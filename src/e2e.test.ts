@@ -651,6 +651,40 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     }
   });
 
+  it('toggling Switch OFF still sends de-activate even when we never saw a 770 q=1', async () => {
+    // Regression: previously the SET handler short-circuited when
+    // `target === this.active`. If the panel sounded the siren without
+    // emitting type=770 (or we missed it), `this.active` stayed false and
+    // tapping OFF in the Home app silently sent nothing.
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 150, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // Note: we deliberately do NOT send a 770 q=1 here — simulating the
+      // panel either not reporting the activation or us having missed it.
+      const before = alarm.received.length;
+      const siren = await findAccessoryByName(fix, 'E2E Siren');
+      assert.ok(!siren.values.On, 'precondition: switch is OFF');
+
+      await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
+        characteristicType: 'On', value: false,
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 36);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `expected de-activate-output OPERATION even from a "no-change" SET; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.optype, 36);
+      assert.equal(op.order, 1);
+    } finally {
+      alarm.close();
+    }
+  });
+
   it('toggling Switch ON (manual activation) is rejected — no OPERATION sent', async () => {
     const alarm = await fix.connectAlarm();
     try {

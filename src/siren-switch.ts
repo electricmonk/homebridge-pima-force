@@ -61,14 +61,13 @@ export class SirenSwitch {
 
   private async handleSet(value: CharacteristicValue): Promise<void> {
     const target = Boolean(value);
-    if (target === this.active) return;
 
     if (target) {
       // User tried to turn the siren ON from HomeKit. The plugin won't
       // activate the external siren on demand — it sounds only in response
-      // to alarm conditions on the panel. Snap the toggle back to OFF.
+      // to alarm conditions on the panel. Snap the toggle back.
       this.platform.log.warn(
-        `siren can only be muted from HomeKit; not activated. Output ${this.accessory.context.output} stays inactive.`,
+        `siren can only be muted from HomeKit; not activated. Output ${this.accessory.context.output} stays in its current state (active=${this.active}).`,
       );
       // Schedule a deferred update so HomeKit accepts our SET first, then
       // sees the corrected value moments later.
@@ -78,11 +77,15 @@ export class SirenSwitch {
       return;
     }
 
-    // User toggled OFF while the siren was sounding → mute it.
+    // User toggled OFF. Always send de-activate regardless of our cached
+    // `active` state — the panel may have flipped the siren on without
+    // emitting a type=770 event we recognized, and de-activate is
+    // idempotent on the panel (no-op if already off). This is the fix for:
+    // "I triggered an alarm, toggled the HomeKit switch off, but the siren
+    // kept sounding" — root cause was a short-circuit return when our
+    // local state hadn't tracked the activation.
     try {
       await this.platform.driver.setOutput(this.accessory.context.output, false);
-      // Optimistic flip; the panel will confirm via type=770 q=3 (which
-      // calls setSounding(false) and is a no-op since we're already off).
       this.active = false;
       this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
       this.platform.log.info(
