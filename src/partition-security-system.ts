@@ -1,11 +1,13 @@
 import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
 import type { PimaForcePlatform } from './platform.js';
-import type { ArmMode } from './types.js';
+import type { ArmMode, ArmModeToggles } from './types.js';
 
 export interface PartitionAccessoryContext {
   kind: 'partition';
   id: number;
   name: string;
+  /** Which HomeKit armed states to expose for this partition. */
+  armModes?: ArmModeToggles;
 }
 
 /**
@@ -39,6 +41,9 @@ export class PartitionSecuritySystem {
     2: 'home2', // NIGHT_ARM
   };
 
+  /** Set of HomeKit target states allowed for this partition. */
+  private readonly allowedTargets: Set<number>;
+
   constructor(
     private readonly platform: PimaForcePlatform,
     private readonly accessory: PlatformAccessory<PartitionAccessoryContext>,
@@ -59,8 +64,26 @@ export class PartitionSecuritySystem {
     this.targetState = Characteristic.SecuritySystemTargetState.DISARM;
     this.currentState = Characteristic.SecuritySystemCurrentState.DISARMED;
 
+    // Build the set of HomeKit target states this partition allows. DISARM
+    // is always allowed; the three armed states are toggled per partition
+    // via config (default: all enabled).
+    const toggles = accessory.context.armModes ?? {};
+    this.allowedTargets = new Set<number>([Characteristic.SecuritySystemTargetState.DISARM]);
+    if (toggles.stay !== false)  this.allowedTargets.add(Characteristic.SecuritySystemTargetState.STAY_ARM);
+    if (toggles.away !== false)  this.allowedTargets.add(Characteristic.SecuritySystemTargetState.AWAY_ARM);
+    if (toggles.night !== false) this.allowedTargets.add(Characteristic.SecuritySystemTargetState.NIGHT_ARM);
+    if (this.allowedTargets.size === 1) {
+      // Only DISARM enabled — partition can't be armed from HomeKit.
+      this.platform.log.warn(
+        `partition ${accessory.context.id} (${accessory.context.name}): all armed modes disabled in config; only DISARM is available`,
+      );
+    }
+
     this.service
       .getCharacteristic(Characteristic.SecuritySystemTargetState)
+      // Restrict the picker in the Home app to enabled modes; HAP will
+      // also reject SET requests for values outside this list.
+      .setProps({ validValues: [...this.allowedTargets].sort((a, b) => a - b) })
       .onGet(() => this.targetState)
       .onSet((v) => this.handleSetTarget(v));
 
@@ -119,6 +142,15 @@ export class PartitionSecuritySystem {
     const C = this.platform.api.hap.Characteristic;
     const target = Number(value);
     if (target === this.targetState) return;
+    if (!this.allowedTargets.has(target)) {
+      // Defense in depth — HAP's validValues should already prevent this.
+      this.platform.log.warn(
+        `partition ${this.accessory.context.id}: arm mode target=${target} is disabled in config`,
+      );
+      throw new this.platform.api.hap.HapStatusError(
+        this.platform.api.hap.HAPStatus.NOT_ALLOWED_IN_CURRENT_STATE,
+      );
+    }
     try {
       if (target === C.SecuritySystemTargetState.DISARM) {
         await this.platform.driver.disarm(this.accessory.context.id);

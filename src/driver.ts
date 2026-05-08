@@ -3,7 +3,9 @@ import net from 'node:net';
 import {
   ackFrame,
   buildAck,
+  buildDataReq,
   buildOperation,
+  dataReqFrame,
   EVENT_TYPE_BURGLARY,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
@@ -20,6 +22,8 @@ import {
   OPTYPE_ARM_SHABBAT,
   OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
+  PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_ZONE_NAMES,
   parseFrames,
   QUALIFIER_NEW,
   QUALIFIER_RESTORE,
@@ -116,6 +120,45 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * The OPERATION partition field is 0 (panel-wide). The user code from
    * the first configured partition is used to authorize.
    */
+  /**
+   * Request a configuration/status parameter from the panel (DATA-REQ).
+   * The response arrives asynchronously as a `data` event (or a `nak` if
+   * the panel rejects). Authorization uses the first configured partition's
+   * user code, same as output operations.
+   */
+  requestData(params: { id: number; startOrder: number; stopOrder?: number }): Promise<void> {
+    const part = this.config.partitions[0];
+    if (!part) {
+      return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
+    }
+    return new Promise((resolve, reject) => {
+      const sock = this.activeSocket;
+      if (!sock || sock.destroyed) {
+        return reject(new Error('no active panel connection'));
+      }
+      const reqParams = {
+        account: this.config.account,
+        counter: this.opCounter++,
+        password: part.userCode,
+        id: params.id,
+        startOrder: params.startOrder,
+        stopOrder: params.stopOrder,
+      };
+      this.emit('frameOut', dataReqFrame(reqParams));
+      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  /** Convenience: request the panel's zone names (parameter id 260). */
+  getZoneNames(startOrder = 1, stopOrder?: number): Promise<void> {
+    return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
+  }
+
+  /** Convenience: request the count of installed zones (parameter id 2148). */
+  getZoneCount(): Promise<void> {
+    return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
+  }
+
   setOutput(output: number, active: boolean): Promise<void> {
     const part = this.config.partitions[0];
     if (!part) {
@@ -185,7 +228,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     // multiple frames per chunk. We don't currently buffer across chunks
     // (a frame split across two TCP segments would be lost) — this hasn't
     // been observed in practice on a LAN with the panel.
-    for (const frame of parseFrames(buf)) {
+    for (const frame of parseFrames(buf, this.config.encoding)) {
       this.emit('frameIn', frame as unknown as Record<string, unknown>);
       if (shouldAck(frame)) {
         const ack = ackFrame(frame);
@@ -213,6 +256,19 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
 
     if (t === 'event') {
       this.dispatchEvent(frame);
+      return;
+    }
+
+    if (t === 'DATA') {
+      // Response to a DATA-REQ we sent. Parameters are always strings per
+      // spec section 4.6.5; the consumer interprets them.
+      const id = Number(frame.id ?? 0);
+      const startOrder = Number(frame.start_order ?? 0);
+      const params = Array.isArray(frame.parameters)
+        ? frame.parameters.map(String)
+        : [];
+      const more = frame.more === 'yes';
+      this.emit('data', { id, startOrder, parameters: params, more });
       return;
     }
 

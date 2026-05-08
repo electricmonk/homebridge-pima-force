@@ -10,6 +10,8 @@
  *   PIMA_PORT    (default 7780)  — TCP port the alarm dials in to
  *   PIMA_ACCOUNT (default 1234)  — Account ID configured on the panel CMS path
  *   PIMA_DEBUG   (1 to enable)   — log every wire frame in/out
+ *   PIMA_ENCODING (default utf-8) — text encoding for string values; use
+ *                                   `windows-1255` for Hebrew zone names
  *
  * Stdin commands:
  *   arm <partition> [mode]   mode = away (default) | home1 | home2 | home3 | home4 | shabbat
@@ -18,6 +20,8 @@
  *   output deactivate <N>    de-activate panel output N
  *   siren on                 shortcut for `output activate 1`
  *   siren off                shortcut for `output deactivate 1`
+ *   zones count              ask the panel how many zones are installed
+ *   zones names [N [M]]      ask for zone names (default first 16; second arg = stop)
  *   debug on|off             toggle wire-frame logging at runtime
  *   status
  *   quit
@@ -31,6 +35,7 @@ const ARM_MODES: ArmMode[] = ['away', 'home1', 'home2', 'home3', 'home4', 'shabb
 
 const PORT = Number(process.env.PIMA_PORT ?? 7780);
 const ACCOUNT = Number(process.env.PIMA_ACCOUNT ?? 1234);
+const ENCODING = process.env.PIMA_ENCODING || 'utf-8';
 let debug = process.env.PIMA_DEBUG === '1';
 
 const partitions: PartitionConfig[] = [];
@@ -53,7 +58,7 @@ function log(msg: string): void {
   process.stdout.write(`[${ts()}] ${msg}\n`);
 }
 
-const driver = new PimaDriver({ port: PORT, account: ACCOUNT, partitions });
+const driver = new PimaDriver({ port: PORT, account: ACCOUNT, partitions, encoding: ENCODING });
 
 driver.on('connected',    () => log('CONNECTED — alarm dialed in'));
 driver.on('disconnected', () => log('DISCONNECTED'));
@@ -72,6 +77,26 @@ driver.on('disarm', ({ partition, source }) => {
 
 driver.on('output', ({ output, partition, active }) => {
   log(`output ${output} (partition ${partition}) → ${active ? 'ACTIVE' : 'inactive'}`);
+});
+
+driver.on('data', ({ id, startOrder, parameters, more }) => {
+  // Pretty-print the responses we know about; fall back to raw JSON otherwise.
+  if (id === 260) {
+    // Zone names — useful for plugin config bootstrap. Skip empty slots.
+    log(`zone names ${startOrder}..${startOrder + parameters.length - 1}${more ? ' (more)' : ''}:`);
+    parameters.forEach((name, i) => {
+      const zone = startOrder + i;
+      const trimmed = name.trim();
+      if (trimmed) log(`  zone ${zone}: ${trimmed}`);
+    });
+    if (more) log(`  (more available — request again with start_order=${startOrder + parameters.length})`);
+    return;
+  }
+  if (id === 2148) {
+    log(`installed zone count: ${parameters[0] ?? '(empty)'}`);
+    return;
+  }
+  log(`DATA id=${id} start=${startOrder}${more ? ' (more)' : ''} parameters=${JSON.stringify(parameters)}`);
 });
 
 driver.on('alarm', ({ zone, partition, active }) => {
@@ -106,8 +131,8 @@ driver.on('frameOut', (frame) => {
 });
 
 await driver.start();
-log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
-log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | debug on|off | status | quit');
+log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | encoding=${ENCODING} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
+log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | zones count|names [start [stop]] | debug on|off | status | quit');
 
 const rl = readline.createInterface({ input: process.stdin });
 
@@ -148,6 +173,25 @@ rl.on('line', async (line) => {
         log(`>> siren ${action} (${action === 'on' ? 'activate' : 'deactivate'} output 1)`);
         await driver.setOutput(1, action === 'on');
         return;
+      }
+      case 'zones': {
+        const action = rest[0];
+        if (action === 'count') {
+          log('>> request installed zone count');
+          await driver.getZoneCount();
+          return;
+        }
+        if (action === 'names') {
+          const start = Number(rest[1] ?? 1);
+          const stop = rest[2] !== undefined ? Number(rest[2]) : start + 15;
+          if (!start || !stop || stop < start) {
+            return log('usage: zones names [start [stop]]; start, stop are 1-indexed zone numbers (1-144)');
+          }
+          log(`>> request zone names ${start}..${stop}`);
+          await driver.getZoneNames(start, stop);
+          return;
+        }
+        return log('usage: zones count | zones names [start [stop]]');
       }
       case 'debug': {
         if (rest[0] === 'on') { debug = true; log('debug ON'); }

@@ -80,6 +80,28 @@
               "description": "User code for arming/disarming this partition. Stored in plain text in Homebridge config — protect access to the host accordingly.",
               "pattern": "^[0-9]{4,8}$"
             },
+            "armModes": {
+              "title": "Enabled Arm Modes",
+              "type": "object",
+              "description": "Uncheck modes you don't use to remove them from the HomeKit picker. DISARM is always available.",
+              "properties": {
+                "away": {
+                  "title": "Away (Pima Full Arm)",
+                  "type": "boolean",
+                  "default": true
+                },
+                "stay": {
+                  "title": "Stay (Pima Home 1)",
+                  "type": "boolean",
+                  "default": true
+                },
+                "night": {
+                  "title": "Night (Pima Home 2)",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            },
             "zones": {
               "title": "Zones",
               "type": "array",

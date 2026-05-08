@@ -149,6 +149,25 @@ describe('PimaDriver — receive side', () => {
     assert.deepEqual(event, { partition: 1, source: 'local' });
   });
 
+  it('emits data when the panel returns a DATA frame (zone names)', async () => {
+    const off = once(h!.driver, 'data');
+    h!.alarm.write('{"frame_type":"DATA","counter":80,"account":"1234","id":260,"start_order":1,"parameters":["Front Door","Back Door","Kitchen PIR"]}');
+    const [event] = await off;
+    assert.deepEqual(event, {
+      id: 260,
+      startOrder: 1,
+      parameters: ['Front Door', 'Back Door', 'Kitchen PIR'],
+      more: false,
+    });
+  });
+
+  it('flags more:"yes" on paginated DATA responses', async () => {
+    const off = once(h!.driver, 'data');
+    h!.alarm.write('{"frame_type":"DATA","counter":81,"account":"1234","id":260,"start_order":1,"parameters":["Front Door"],"more":"yes"}');
+    const [event] = await off;
+    assert.equal(event.more, true);
+  });
+
   it('emits unknown for unrecognized event types', async () => {
     const off = once(h!.driver, 'unknown');
     h!.alarm.write('{"frame_type":"event","counter":70,"account":"1234","type":999,"qualifier":1,"zone":1,"partition":1}');
@@ -205,6 +224,34 @@ describe('PimaDriver — send side (arm/disarm)', () => {
 
   it('arm() rejects for an unknown partition', async () => {
     await assert.rejects(h!.driver.arm(99), /partition 99 not configured/);
+  });
+
+  it('getZoneNames() sends a DATA-REQ with id=260 and the right range', async () => {
+    await h!.driver.getZoneNames(1, 16);
+    await waitForRx(h!, 1);
+    assert.deepEqual(h!.rxFromDriver[0], {
+      frame_type: 'DATA-REQ',
+      counter: 5000,
+      account: 1234,
+      password: '1111',
+      id: 260,
+      start_order: 1,
+      stop_order: 16,
+    });
+  });
+
+  it('getZoneCount() sends a DATA-REQ with id=2148', async () => {
+    await h!.driver.getZoneCount();
+    await waitForRx(h!, 1);
+    assert.deepEqual(h!.rxFromDriver[0], {
+      frame_type: 'DATA-REQ',
+      counter: 5000,
+      account: 1234,
+      password: '1111',
+      id: 2148,
+      start_order: 1,
+      stop_order: 1,
+    });
   });
 });
 

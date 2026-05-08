@@ -145,6 +145,15 @@ async function setupE2E(): Promise<E2EFixture> {
               { zone: 6, name: 'E2E Smoke', type: 'smoke' },
             ],
           },
+          {
+            // Used to test the per-partition armModes toggle: AWAY enabled,
+            // STAY and NIGHT disabled, so HomeKit picker should expose only
+            // DISARM and AWAY for this partition.
+            id: 3,
+            name: 'E2E Restricted',
+            userCode: '0000',
+            armModes: { away: true, stay: false, night: false },
+          },
         ],
       },
     ],
@@ -326,6 +335,7 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     // until they're all visible.
     await waitForAccessories(fix, [
       'E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke', 'E2E Siren',
+      'E2E Restricted',
     ]);
   });
   after(async () => { await fix?.stop(); });
@@ -877,6 +887,92 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       await waitForAccessoryState(fix, 'E2E Smoke', (a) => a.values.SmokeDetected === 1);
       alarm.send({ frame_type: 'event', counter: 102, account: String(fix.account), type: 760, qualifier: 3, zone: 6, partition: 2 });
       await waitForAccessoryState(fix, 'E2E Smoke', (a) => a.values.SmokeDetected === 0);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('restricted partition advertises only DISARM and AWAY as valid targets', async () => {
+    // The UI's accessory listing exposes the characteristic's `validValues`
+    // (i.e. the values the picker offers in the Home app). For the partition
+    // with armModes={away:true, stay:false, night:false} we expect just
+    // DISARM (3) and AWAY_ARM (1).
+    const partition = await findAccessoryByName(fix, 'E2E Restricted');
+    const targetChar = partition.serviceCharacteristics.find(
+      (c) => c.type === 'SecuritySystemTargetState',
+    ) as { type: string; value: unknown; minValue?: number; maxValue?: number; validValues?: number[] } | undefined;
+    assert.ok(targetChar, 'SecuritySystemTargetState characteristic missing');
+    // Either explicit validValues or a tightened min/max range — HAP exposes
+    // validValues, but some serializations also expose minValue/maxValue.
+    const allowed = targetChar.validValues ?? [];
+    if (allowed.length > 0) {
+      assert.deepEqual(
+        [...allowed].sort((a, b) => a - b),
+        [1, 3],
+        `expected validValues [AWAY=1, DISARM=3], got ${JSON.stringify(allowed)}`,
+      );
+    } else if (targetChar.minValue !== undefined && targetChar.maxValue !== undefined) {
+      // Fallback: at minimum, the range should not include STAY=0.
+      assert.ok(targetChar.minValue >= 1, `expected minValue >= 1, got ${targetChar.minValue}`);
+    } else {
+      assert.fail('characteristic exposed neither validValues nor min/max — cannot verify restriction');
+    }
+  });
+
+  it('disabled mode SET on restricted partition does not send an arm OPERATION', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 200, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Restricted');
+      // STAY (0) is disabled. Try to SET it. HAP should reject (4xx/5xx) or
+      // the platform's defense-in-depth check rejects. Either way, no
+      // arm OPERATION should reach the panel.
+      try {
+        await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+          characteristicType: 'SecuritySystemTargetState', value: 0, // STAY_ARM
+        });
+      } catch {
+        // expected — error from HAP/platform is fine
+      }
+
+      await new Promise((r) => setTimeout(r, 300));
+      const op = alarm.received.slice(before).find(
+        (f) => f.frame_type === 'OPERATION' && (f.optype === 13 || f.optype === 14),
+      );
+      assert.equal(op, undefined, `disabled mode should not send Home1/Home2; got: ${JSON.stringify(op)}`);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('enabled mode SET on restricted partition still works (AWAY → optype 12)', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 210, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Restricted');
+      // Force DISARM first so the AWAY transition fires SET.
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 1, // AWAY_ARM (enabled)
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 12);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `expected AWAY arm (optype=12) on restricted partition; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.partition, 3);
     } finally {
       alarm.close();
     }

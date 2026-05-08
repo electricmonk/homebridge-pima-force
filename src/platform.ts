@@ -27,6 +27,8 @@ interface PartitionConfigEntry {
   name: string;
   userCode: string;
   zones?: ZoneConfig[];
+  /** Optional checkboxes for which HomeKit armed states to expose. */
+  armModes?: { away?: boolean; stay?: boolean; night?: boolean };
 }
 
 interface SirenConfig {
@@ -233,7 +235,12 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     // accessory after the v0.1 → v0.2 migration. The old Switch accessory
     // becomes stale and is removed by the cleanup pass.
     const uuid = this.api.hap.uuid.generate(`pima-force:security-system:${p.id}`);
-    const ctx: PartitionAccessoryContext = { kind: 'partition', id: p.id, name: p.name };
+    const ctx: PartitionAccessoryContext = {
+      kind: 'partition',
+      id: p.id,
+      name: p.name,
+      armModes: p.armModes,
+    };
     let accessory = this.cachedAccessories.get(uuid) as
       | PlatformAccessory<PartitionAccessoryContext>
       | undefined;
