@@ -9,7 +9,7 @@ import { PimaDriver } from './driver.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
 import { OUTPUT_EXTERNAL_SIREN } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
-import { SirenSpeaker, type SirenAccessoryContext } from './siren-speaker.js';
+import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
 import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
 
@@ -51,7 +51,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   private readonly partitions = new Map<number, PartitionSecuritySystem>();
   private readonly zones = new Map<number, ZoneSensor>();
   /** Output number → accessory (e.g., 1 = external siren). */
-  private readonly sirens = new Map<number, SirenSpeaker>();
+  private readonly sirens = new Map<number, SirenSwitch>();
   /** Track ids we've already info-logged so we don't spam on every event. */
   private readonly seenUnknownPartitions = new Set<number>();
   private readonly seenUnknownZones = new Set<number>();
@@ -124,6 +124,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     });
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
+    });
+    this.driver.on('nak', ({ counter, account, reason }) => {
+      // The panel rejected an OPERATION/ACK we sent. Log loudly so the user
+      // can see why a command (e.g. siren mute) silently didn't take effect.
+      log.warn(`panel NAK (counter=${counter}, account=${account}): ${reason}`);
     });
     this.driver.on('unknown', (frame) => {
       log.warn(`unknown panel frame: ${JSON.stringify(frame)}`);
@@ -269,7 +274,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
       this.log.info(`registered siren speaker: ${name} (output ${output})`);
     }
-    this.sirens.set(output, new SirenSpeaker(this, accessory));
+    this.sirens.set(output, new SirenSwitch(this, accessory));
     return uuid;
   }
 }

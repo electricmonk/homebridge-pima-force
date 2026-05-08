@@ -191,7 +191,18 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
 
   private dispatch(frame: PanelFrame): void {
     const t = frame.frame_type;
-    if (t === 'null' || t === 'ACK' || t === 'NAK') return; // control frames
+    if (t === 'null' || t === 'ACK') return; // bookkeeping; nothing to surface
+
+    if (t === 'NAK') {
+      // Panel rejected something we sent. Surface it so callers can log the
+      // reason. We still don't ACK NAKs (would create a feedback storm).
+      this.emit('nak', {
+        counter: typeof frame.counter === 'number' ? frame.counter : undefined,
+        account: frame.account,
+        reason: typeof frame.data === 'string' ? frame.data : 'unknown',
+      });
+      return;
+    }
 
     if (t === 'event') {
       this.dispatchEvent(frame);

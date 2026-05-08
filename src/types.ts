@@ -68,6 +68,17 @@ export interface AlarmEvent {
 }
 
 /**
+ * Panel rejected one of our requests. The `reason` field carries the panel's
+ * free-text NAK data string (Appendix D of the spec), e.g. "invalid password",
+ * "JSON frame", "Wrong Account ID".
+ */
+export interface NakEvent {
+  counter?: number;
+  account?: string | number;
+  reason: string;
+}
+
+/**
  * Arm modes recognized by the panel (Appendix B).
  * - `away`    — Full Arm (optype 12)
  * - `home1`-`home4` — Home modes (optype 13-16)
@@ -103,6 +114,7 @@ export interface PimaDriverEvents {
   output: [OutputEvent];
   alarm: [AlarmEvent];
   system: [SystemEvent];
+  nak: [NakEvent];
   unknown: [PanelFrame];
   error: [Error];
 }

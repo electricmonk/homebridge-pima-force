@@ -353,10 +353,10 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     assert.equal(partition?.type, 'SecuritySystem');
   });
 
-  it('siren is exposed as a Speaker service', async () => {
+  it('siren is exposed as a Switch service', async () => {
     const list = await listAccessories(fix);
     const siren = list.find((a) => a.serviceName === 'E2E Siren');
-    assert.equal(siren?.type, 'Speaker');
+    assert.equal(siren?.type, 'Switch');
   });
 
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
@@ -559,7 +559,7 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     }
   });
 
-  it('siren ON event flips Speaker Mute to false', async () => {
+  it('siren ON event flips Switch On to true', async () => {
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 120, account: String(fix.account) });
@@ -574,21 +574,50 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         zone: 1,
         partition: 1,
       });
-      // Speaker.Mute is boolean; HAP may surface as 0/1.
-      const acc = await waitForAccessoryState(fix, 'E2E Siren',
-        (a) => !a.values.Mute);
-      assert.ok(!acc.values.Mute);
+      const acc = await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
+      assert.ok(Boolean(acc.values.On));
     } finally {
       alarm.close();
     }
   });
 
-  it('toggling Speaker Mute=true sends de-activate output OPERATION', async () => {
+  it('siren OFF event flips Switch On to false', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 122, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      alarm.send({
+        frame_type: 'event',
+        counter: 123,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 1,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
+      // Now send the de-activated event; switch should flip back.
+      alarm.send({
+        frame_type: 'event',
+        counter: 124,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 3,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => !a.values.On);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('toggling Switch OFF (while sounding) sends de-activate output OPERATION', async () => {
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 130, account: String(fix.account) });
       await alarm.waitForRx(1);
-      // First make the siren "sounding" so the Mute toggle has work to do.
+      // First make the siren "sounding" so toggling OFF has work to do.
       alarm.send({
         frame_type: 'event',
         counter: 131,
@@ -598,12 +627,12 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         zone: 1,
         partition: 1,
       });
-      await waitForAccessoryState(fix, 'E2E Siren', (a) => !a.values.Mute);
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
 
       const before = alarm.received.length;
       const siren = await findAccessoryByName(fix, 'E2E Siren');
       await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
-        characteristicType: 'Mute', value: true,
+        characteristicType: 'On', value: false,
       });
 
       const deadline = Date.now() + 5000;
@@ -617,6 +646,44 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       assert.equal(op.optype, 36);
       assert.equal(op.order, 1); // external siren
       assert.equal(op.partition, 0); // panel-wide
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('toggling Switch ON (manual activation) is rejected — no OPERATION sent', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 140, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // Ensure siren is OFF first.
+      alarm.send({
+        frame_type: 'event',
+        counter: 141,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 3,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => !a.values.On);
+
+      const before = alarm.received.length;
+      const siren = await findAccessoryByName(fix, 'E2E Siren');
+      await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
+        characteristicType: 'On', value: true,
+      });
+
+      // Wait briefly for any OPERATION to surface; assert NONE arrives.
+      await new Promise((r) => setTimeout(r, 500));
+      const op = alarm.received.slice(before).find(
+        (f) => f.frame_type === 'OPERATION' && (f.optype === 35 || f.optype === 36),
+      );
+      assert.equal(op, undefined, `no output OPERATION should be sent on manual activation; got: ${JSON.stringify(op)}`);
+
+      // And the switch should be back to OFF.
+      const acc = await findAccessoryByName(fix, 'E2E Siren');
+      assert.ok(!acc.values.On, `expected siren switch to remain OFF; got On=${acc.values.On}`);
     } finally {
       alarm.close();
     }
