@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import {
+  ackFrame,
   buildAck,
   buildOperation,
   EVENT_TYPE_BURGLARY,
@@ -9,6 +10,7 @@ import {
   EVENT_TYPE_OUTPUT,
   EVENT_TYPE_REMOTE_ARM,
   EVENT_TYPE_ZONE,
+  operationFrame,
   OPTYPE_ACTIVATE_OUTPUT,
   OPTYPE_ARM_AWAY,
   OPTYPE_ARM_HOME1,
@@ -124,15 +126,16 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
       }
-      const frame = buildOperation({
+      const params = {
         account: this.config.account,
         counter: this.opCounter++,
         optype: active ? OPTYPE_ACTIVATE_OUTPUT : OPTYPE_DEACTIVATE_OUTPUT,
         partition: 0,
         order: output,
         password: part.userCode,
-      });
-      sock.write(frame, (err) => (err ? reject(err) : resolve()));
+      };
+      this.emit('frameOut', operationFrame(params));
+      sock.write(buildOperation(params), (err) => (err ? reject(err) : resolve()));
     });
   }
 
@@ -146,14 +149,15 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!part) {
         return reject(new Error(`partition ${partition} not configured`));
       }
-      const frame = buildOperation({
+      const params = {
         account: this.config.account,
         counter: this.opCounter++,
         optype,
         partition,
         password: part.userCode,
-      });
-      sock.write(frame, (err) => (err ? reject(err) : resolve()));
+      };
+      this.emit('frameOut', operationFrame(params));
+      sock.write(buildOperation(params), (err) => (err ? reject(err) : resolve()));
     });
   }
 
@@ -182,7 +186,10 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     // (a frame split across two TCP segments would be lost) — this hasn't
     // been observed in practice on a LAN with the panel.
     for (const frame of parseFrames(buf)) {
+      this.emit('frameIn', frame as unknown as Record<string, unknown>);
       if (shouldAck(frame)) {
+        const ack = ackFrame(frame);
+        this.emit('frameOut', ack);
         sock.write(buildAck(frame));
       }
       this.dispatch(frame);

@@ -39,9 +39,17 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   account?: number;
   partitions?: PartitionConfigEntry[];
   siren?: SirenConfig;
+  /** When true, log every frame in/out at info level (passwords redacted). */
+  debug?: boolean;
 }
 
 type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
+
+/** Strip the `password` field from a frame before logging. */
+function redactPassword(frame: Record<string, unknown>): Record<string, unknown> {
+  if (frame.password === undefined) return frame;
+  return { ...frame, password: '***' };
+}
 
 export class PimaForcePlatform implements DynamicPlatformPlugin {
   public readonly driver: PimaDriver;
@@ -133,6 +141,18 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('unknown', (frame) => {
       log.warn(`unknown panel frame: ${JSON.stringify(frame)}`);
     });
+
+    // Optional verbose mode: log every wire frame in both directions.
+    // Off by default; enable via `"debug": true` in plugin config.
+    if (config.debug) {
+      log.info('debug logging enabled — every frame in/out will be logged');
+      this.driver.on('frameIn', (frame) => {
+        log.info(`<< ${JSON.stringify(frame)}`);
+      });
+      this.driver.on('frameOut', (frame) => {
+        log.info(`>> ${JSON.stringify(redactPassword(frame))}`);
+      });
+    }
 
     api.on('didFinishLaunching', () => this.discoverDevices());
     api.on('shutdown', () => {

@@ -66,14 +66,18 @@ export function parseFrames(buf: Buffer): PanelFrame[] {
  * Panel will respond with NAK ("JSON frame") and then go silent for 60s
  * if any field is wrong.
  */
-export function buildAck(received: PanelFrame): Buffer {
-  const ack = {
+/** Object form of the ACK we'd build for `received`. Useful for logging. */
+export function ackFrame(received: PanelFrame): Record<string, unknown> {
+  return {
     account: Number(received.account ?? 0),
     counter: received.counter ?? 0,
     frame_type: 'ACK',
     kc: 1,
   };
-  return Buffer.from(JSON.stringify(ack), 'utf8');
+}
+
+export function buildAck(received: PanelFrame): Buffer {
+  return Buffer.from(JSON.stringify(ackFrame(received)), 'utf8');
 }
 
 /**
@@ -107,8 +111,9 @@ export interface OperationParams {
  *   12 = ARM (full arm)
  *   17 = DISARM
  */
-export function buildOperation(p: OperationParams): Buffer {
-  const op = {
+/** Object form of an OPERATION frame. Carries `password` — redact when logging. */
+export function operationFrame(p: OperationParams): Record<string, unknown> {
+  return {
     account: p.account,
     counter: p.counter,
     frame_type: 'OPERATION',
@@ -118,7 +123,10 @@ export function buildOperation(p: OperationParams): Buffer {
     partition: p.partition,
     password: p.password,
   };
-  return Buffer.from(JSON.stringify(op), 'utf8');
+}
+
+export function buildOperation(p: OperationParams): Buffer {
+  return Buffer.from(JSON.stringify(operationFrame(p)), 'utf8');
 }
 
 /**

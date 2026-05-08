@@ -27,10 +27,16 @@
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
+      "debug": {
+        "title": "Debug Logging",
+        "type": "boolean",
+        "default": false,
+        "description": "When on, every JSON frame received from or sent to the alarm panel is logged at info level (passwords are redacted). Useful for diagnosing issues; noisy in normal operation."
+      },
       "siren": {
-        "title": "External Siren (Speaker)",
+        "title": "External Siren (Switch)",
         "type": "object",
-        "description": "Optional Speaker accessory mirroring the external siren state. Mute to silence an active siren.",
+        "description": "Optional Switch accessory mirroring the external siren state. ON = siren currently sounding; OFF = silent. Toggle OFF while sounding to mute the siren. Cannot be turned ON manually.",
         "properties": {
           "enabled": {
             "title": "Expose siren accessory",

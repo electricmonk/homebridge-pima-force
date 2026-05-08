@@ -117,4 +117,8 @@ export interface PimaDriverEvents {
   nak: [NakEvent];
   unknown: [PanelFrame];
   error: [Error];
+  /** Raw wire-level diagnostics: every parsed frame received from the panel. */
+  frameIn: [Record<string, unknown>];
+  /** Raw wire-level diagnostics: every frame written to the panel. May contain a `password` field. */
+  frameOut: [Record<string, unknown>];
 }
