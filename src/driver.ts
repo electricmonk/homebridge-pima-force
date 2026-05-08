@@ -264,9 +264,15 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       // spec section 4.6.5; the consumer interprets them.
       const id = Number(frame.id ?? 0);
       const startOrder = Number(frame.start_order ?? 0);
-      const params = Array.isArray(frame.parameters)
+      let params = Array.isArray(frame.parameters)
         ? frame.parameters.map(String)
         : [];
+      if (this.config.reverseStrings) {
+        // Spread iterates by code point so non-BMP characters (e.g. emoji)
+        // wouldn't get split mid-surrogate; for Hebrew this is just code
+        // unit reversal anyway since it's BMP.
+        params = params.map((s) => [...s].reverse().join(''));
+      }
       const more = frame.more === 'yes';
       this.emit('data', { id, startOrder, parameters: params, more });
       return;

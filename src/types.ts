@@ -29,6 +29,18 @@ export interface PimaDriverConfig {
    * `'utf-8'`, `'windows-1255'`, `'iso-8859-8'`, `'iso-8859-1'`, etc.
    */
   encoding?: string;
+  /**
+   * When true, reverse the order of code points in every string value
+   * returned in DATA responses. Pima FORCE panels often store text in
+   * "visual order" (the order of pixels on the LCD, left-to-right) rather
+   * than logical order. Modern Unicode systems expect logical order and
+   * apply right-to-left rendering via bidi; without this flag, Hebrew zone
+   * names appear letter-reversed.
+   *
+   * Reverses *all* string parameters when enabled — leave off if the panel
+   * already returns logical-order strings.
+   */
+  reverseStrings?: boolean;
 }
 
 /**

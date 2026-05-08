@@ -10,8 +10,10 @@
  *   PIMA_PORT    (default 7780)  — TCP port the alarm dials in to
  *   PIMA_ACCOUNT (default 1234)  — Account ID configured on the panel CMS path
  *   PIMA_DEBUG   (1 to enable)   — log every wire frame in/out
- *   PIMA_ENCODING (default utf-8) — text encoding for string values; use
+ *   PIMA_ENCODING (default windows-1255) — text encoding for string values; use
  *                                   `windows-1255` for Hebrew zone names
+ *   PIMA_REVERSE_STRINGS (1 to enable) — reverse string parameter order;
+ *                                   use when Hebrew names come back visually flipped
  *
  * Stdin commands:
  *   arm <partition> [mode]   mode = away (default) | home1 | home2 | home3 | home4 | shabbat
@@ -35,7 +37,8 @@ const ARM_MODES: ArmMode[] = ['away', 'home1', 'home2', 'home3', 'home4', 'shabb
 
 const PORT = Number(process.env.PIMA_PORT ?? 7780);
 const ACCOUNT = Number(process.env.PIMA_ACCOUNT ?? 1234);
-const ENCODING = process.env.PIMA_ENCODING || 'utf-8';
+const ENCODING = process.env.PIMA_ENCODING || 'windows-1255';
+const REVERSE_STRINGS = process.env.PIMA_REVERSE_STRINGS === '1';
 let debug = process.env.PIMA_DEBUG === '1';
 
 const partitions: PartitionConfig[] = [];
@@ -58,7 +61,13 @@ function log(msg: string): void {
   process.stdout.write(`[${ts()}] ${msg}\n`);
 }
 
-const driver = new PimaDriver({ port: PORT, account: ACCOUNT, partitions, encoding: ENCODING });
+const driver = new PimaDriver({
+  port: PORT,
+  account: ACCOUNT,
+  partitions,
+  encoding: ENCODING,
+  reverseStrings: REVERSE_STRINGS,
+});
 
 driver.on('connected',    () => log('CONNECTED — alarm dialed in'));
 driver.on('disconnected', () => log('DISCONNECTED'));
@@ -131,7 +140,7 @@ driver.on('frameOut', (frame) => {
 });
 
 await driver.start();
-log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | encoding=${ENCODING} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
+log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | encoding=${ENCODING}${REVERSE_STRINGS ? ' (reversed)' : ''} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
 log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | zones count|names [start [stop]] | debug on|off | status | quit');
 
 const rl = readline.createInterface({ input: process.stdin });

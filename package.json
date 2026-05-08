@@ -19,6 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/electricmonk/homebridge-pima-force.git"
   },
+  "license": "LGPL-3.0-or-later",
   "main": "dist/index.js",
   "files": [
     "dist",

@@ -168,6 +168,13 @@ describe('PimaDriver — receive side', () => {
     assert.equal(event.more, true);
   });
 
+  it('does not reverse parameter strings unless reverseStrings is enabled', async () => {
+    const off = once(h!.driver, 'data');
+    h!.alarm.write('{"frame_type":"DATA","counter":82,"id":260,"start_order":1,"parameters":["abc","דלת"]}');
+    const [event] = await off;
+    assert.deepEqual(event.parameters, ['abc', 'דלת']);
+  });
+
   it('emits unknown for unrecognized event types', async () => {
     const off = once(h!.driver, 'unknown');
     h!.alarm.write('{"frame_type":"event","counter":70,"account":"1234","type":999,"qualifier":1,"zone":1,"partition":1}');
@@ -264,6 +271,31 @@ describe('PimaDriver — send without connection', () => {
     });
     await driver.start();
     await assert.rejects(driver.arm(1), /no active panel connection/);
+    await driver.stop();
+  });
+});
+
+describe('PimaDriver — reverseStrings option', () => {
+  it('reverses every string parameter in DATA responses when enabled', async () => {
+    const driver = new PimaDriver({
+      port: 0,
+      account: 1234,
+      partitions: [{ id: 1, userCode: '1111' }],
+      reverseStrings: true,
+    });
+    await driver.start();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const addr = ((driver as any).server as net.Server).address() as net.AddressInfo;
+    const connected = once(driver, 'connected');
+    const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
+    await connected;
+    const off = once(driver, 'data');
+    sock.write('{"frame_type":"DATA","counter":1,"id":260,"start_order":1,"parameters":["abc","תלד"]}');
+    const [event] = await off;
+    // 'abc' reversed → 'cba'; visual-order Hebrew 'תלד' (=ת,ל,ד) reversed
+    // to logical-order 'דלת' (=ד,ל,ת).
+    assert.deepEqual(event.parameters, ['cba', 'דלת']);
+    sock.destroy();
     await driver.stop();
   });
 });
