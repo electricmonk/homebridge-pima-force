@@ -18,6 +18,17 @@ export interface PimaDriverConfig {
   partitions: PartitionConfig[];
   /** Starting value for our outgoing OPERATION counter. Default 5000. */
   opCounterStart?: number;
+  /**
+   * Text encoding the panel uses for non-ASCII string values (zone names,
+   * user names, etc.). JSON syntax characters are ASCII either way, so the
+   * frame parses regardless; this only affects how we decode string
+   * contents. Default `'utf-8'`. For Israeli FORCE panels with Hebrew
+   * names, use `'windows-1255'`.
+   *
+   * Anything supported by the global `TextDecoder` is accepted —
+   * `'utf-8'`, `'windows-1255'`, `'iso-8859-8'`, `'iso-8859-1'`, etc.
+   */
+  encoding?: string;
 }
 
 /**
@@ -52,6 +63,66 @@ export interface ZoneEvent {
   active: boolean;
 }
 
+/** Output state change (e.g., siren activated). Output 1 = external siren. */
+export interface OutputEvent {
+  output: number;
+  partition: number;
+  active: boolean;
+}
+
+/** Burglary alarm: a zone tripped while armed and is sounding the siren. */
+export interface AlarmEvent {
+  zone: number;
+  partition: number;
+  /** True = alarm in progress; false = alarm restored. */
+  active: boolean;
+}
+
+/**
+ * Panel rejected one of our requests. The `reason` field carries the panel's
+ * free-text NAK data string (Appendix D of the spec), e.g. "invalid password",
+ * "JSON frame", "Wrong Account ID".
+ */
+export interface NakEvent {
+  counter?: number;
+  account?: string | number;
+  reason: string;
+}
+
+/**
+ * Response to a DATA-REQ. The `parameters` array holds the requested
+ * values starting at `startOrder`. `more` is true when the panel had to
+ * split the response across multiple frames; the consumer should request
+ * the remainder starting at `startOrder + parameters.length`.
+ */
+export interface DataEvent {
+  /** Parameter ID echoed from the request (e.g. 260 = zone names). */
+  id: number;
+  startOrder: number;
+  parameters: string[];
+  more: boolean;
+}
+
+/**
+ * Arm modes recognized by the panel (Appendix B).
+ * - `away`    — Full Arm (optype 12)
+ * - `home1`-`home4` — Home modes (optype 13-16)
+ * - `shabbat` — Shabbat Arm (optype 43)
+ */
+export type ArmMode = 'away' | 'home1' | 'home2' | 'home3' | 'home4' | 'shabbat';
+
+/**
+ * Per-partition toggles for which HomeKit armed states to expose.
+ * `away` ↔ Pima Full Arm; `stay` ↔ Pima Home1; `night` ↔ Pima Home2.
+ * DISARM is always available (you can always disarm). When all three are
+ * `false` the partition can't be armed from HomeKit.
+ */
+export interface ArmModeToggles {
+  away?: boolean;
+  stay?: boolean;
+  night?: boolean;
+}
+
 /**
  * Reported when the panel sends a system/comm status event (e.g. it
  * considers the CMS link restored or troubled). Informational; not a
@@ -77,7 +148,15 @@ export interface PimaDriverEvents {
   arm: [ArmEvent];
   disarm: [ArmEvent];
   zone: [ZoneEvent];
+  output: [OutputEvent];
+  alarm: [AlarmEvent];
   system: [SystemEvent];
+  nak: [NakEvent];
+  data: [DataEvent];
   unknown: [PanelFrame];
   error: [Error];
+  /** Raw wire-level diagnostics: every parsed frame received from the panel. */
+  frameIn: [Record<string, unknown>];
+  /** Raw wire-level diagnostics: every frame written to the panel. May contain a `password` field. */
+  frameOut: [Record<string, unknown>];
 }

@@ -27,6 +27,31 @@
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
+      "debug": {
+        "title": "Debug Logging",
+        "type": "boolean",
+        "default": false,
+        "description": "When on, every JSON frame received from or sent to the alarm panel is logged at info level (passwords are redacted). Useful for diagnosing issues; noisy in normal operation."
+      },
+      "siren": {
+        "title": "External Siren (Switch)",
+        "type": "object",
+        "description": "Optional Switch accessory mirroring the external siren state. ON = siren currently sounding; OFF = silent. Toggle OFF while sounding to mute the siren. Cannot be turned ON manually.",
+        "properties": {
+          "enabled": {
+            "title": "Expose siren accessory",
+            "type": "boolean",
+            "default": true,
+            "description": "Off to suppress the siren accessory entirely."
+          },
+          "name": {
+            "title": "Display Name",
+            "type": "string",
+            "default": "Alarm Siren",
+            "description": "Shown in HomeKit."
+          }
+        }
+      },
       "partitions": {
         "title": "Partitions",
         "type": "array",
@@ -54,6 +79,28 @@
               "format": "password",
               "description": "User code for arming/disarming this partition. Stored in plain text in Homebridge config — protect access to the host accordingly.",
               "pattern": "^[0-9]{4,8}$"
+            },
+            "armModes": {
+              "title": "Enabled Arm Modes",
+              "type": "object",
+              "description": "Uncheck modes you don't use to remove them from the HomeKit picker. DISARM is always available.",
+              "properties": {
+                "away": {
+                  "title": "Away (Pima Full Arm)",
+                  "type": "boolean",
+                  "default": true
+                },
+                "stay": {
+                  "title": "Stay (Pima Home 1)",
+                  "type": "boolean",
+                  "default": true
+                },
+                "night": {
+                  "title": "Night (Pima Home 2)",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
             },
             "zones": {
               "title": "Zones",

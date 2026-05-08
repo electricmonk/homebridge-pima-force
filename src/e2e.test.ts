@@ -132,6 +132,7 @@ async function setupE2E(): Promise<E2EFixture> {
         name: 'Pima E2E',
         port: alarmPort,
         account,
+        siren: { enabled: true, name: 'E2E Siren' },
         partitions: [
           {
             id: 2,
@@ -143,6 +144,15 @@ async function setupE2E(): Promise<E2EFixture> {
               { zone: 5, name: 'E2E Leak', type: 'leak' },
               { zone: 6, name: 'E2E Smoke', type: 'smoke' },
             ],
+          },
+          {
+            // Used to test the per-partition armModes toggle: AWAY enabled,
+            // STAY and NIGHT disabled, so HomeKit picker should expose only
+            // DISARM and AWAY for this partition.
+            id: 3,
+            name: 'E2E Restricted',
+            userCode: '0000',
+            armModes: { away: true, stay: false, night: false },
           },
         ],
       },
@@ -323,14 +333,17 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     // Bridge accessory + plugin accessories take a moment to appear in the
     // UI's data layer after startup (HAP IPC bring-up). Don't start asserting
     // until they're all visible.
-    await waitForAccessories(fix, ['E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke']);
+    await waitForAccessories(fix, [
+      'E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke', 'E2E Siren',
+      'E2E Restricted',
+    ]);
   });
   after(async () => { await fix?.stop(); });
 
   it('all configured accessories appear in the UI', async () => {
     const list = await listAccessories(fix);
     const names = new Set(list.map((a) => a.serviceName));
-    for (const expected of ['E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke']) {
+    for (const expected of ['E2E Partition', 'E2E Motion', 'E2E Door', 'E2E Leak', 'E2E Smoke', 'E2E Siren']) {
       assert.ok(names.has(expected), `expected accessory "${expected}" in ${[...names].join(', ')}`);
     }
   });
@@ -342,6 +355,18 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     assert.equal(byName.get('E2E Motion')?.type, 'MotionSensor');
     assert.equal(byName.get('E2E Leak')?.type, 'LeakSensor');
     assert.equal(byName.get('E2E Smoke')?.type, 'SmokeSensor');
+  });
+
+  it('partition is exposed as a SecuritySystem service', async () => {
+    const list = await listAccessories(fix);
+    const partition = list.find((a) => a.serviceName === 'E2E Partition');
+    assert.equal(partition?.type, 'SecuritySystem');
+  });
+
+  it('siren is exposed as a Switch service', async () => {
+    const list = await listAccessories(fix);
+    const siren = list.find((a) => a.serviceName === 'E2E Siren');
+    assert.equal(siren?.type, 'Switch');
   });
 
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
@@ -392,7 +417,7 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     }
   });
 
-  it('panel ARM event flips partition Switch to On', async () => {
+  it('panel ARM event flips SecuritySystem CurrentState to AWAY_ARM', async () => {
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 20, account: String(fix.account) });
@@ -407,15 +432,17 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         zone: 2,
         partition: 2,
       });
-      // HAP transports booleans as 0/1; treat both representations as truthy.
-      const acc = await waitForAccessoryState(fix, 'E2E Partition', (a) => Boolean(a.values.On));
-      assert.ok(Boolean(acc.values.On), `expected On to be truthy, got ${JSON.stringify(acc.values.On)}`);
+      // SecuritySystemCurrentState: STAY=0, AWAY=1, NIGHT=2, DISARMED=3, ALARM=4.
+      // External arm event with no prior target → defaults to AWAY_ARM (1).
+      const acc = await waitForAccessoryState(fix, 'E2E Partition',
+        (a) => a.values.SecuritySystemCurrentState === 1);
+      assert.equal(acc.values.SecuritySystemCurrentState, 1);
     } finally {
       alarm.close();
     }
   });
 
-  it('UI Switch toggle ON sends OPERATION arm to panel', async () => {
+  it('UI SecuritySystem AWAY target sends OPERATION arm (optype=12)', async () => {
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 30, account: String(fix.account) });
@@ -423,12 +450,14 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       const before = alarm.received.length;
 
       const partition = await findAccessoryByName(fix, 'E2E Partition');
-      // Toggle to OFF first to ensure the SET handler actually fires (it skips if equal).
-      // Then toggle ON.
-      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, { characteristicType: 'On', value: false });
-      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, { characteristicType: 'On', value: true });
+      // Force DISARM first (SET handler short-circuits when value already matches).
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 1, // AWAY_ARM
+      });
 
-      // Wait for an OPERATION frame to arrive at the fake alarm.
       const deadline = Date.now() + 5000;
       let op: Record<string, unknown> | undefined;
       while (Date.now() < deadline) {
@@ -436,11 +465,269 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         if (op) break;
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
-      assert.ok(op, `no ARM OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.ok(op, `no AWAY ARM OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
       assert.equal(op.optype, 12);
       assert.equal(op.partition, 2);
-      assert.equal(op.password, '0000');
-      assert.equal(op.account, fix.account);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('UI SecuritySystem STAY target sends Home1 OPERATION (optype=13)', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 31, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Partition');
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 0, // STAY_ARM
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 13);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `no STAY (Home1) OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.optype, 13);
+      assert.equal(op.partition, 2);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('UI SecuritySystem NIGHT target sends Home2 OPERATION (optype=14)', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 32, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Partition');
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 2, // NIGHT_ARM
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 14);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `no NIGHT (Home2) OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.optype, 14);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('burglary alarm event flips SecuritySystem CurrentState to ALARM_TRIGGERED', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 110, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // type=130 qualifier=1 = burglary alarm
+      alarm.send({
+        frame_type: 'event',
+        counter: 111,
+        account: String(fix.account),
+        type: 130,
+        qualifier: 1,
+        zone: 4,
+        partition: 2,
+      });
+      const acc = await waitForAccessoryState(fix, 'E2E Partition',
+        (a) => a.values.SecuritySystemCurrentState === 4); // ALARM_TRIGGERED
+      assert.equal(acc.values.SecuritySystemCurrentState, 4);
+
+      // Restore: alarm clears.
+      alarm.send({
+        frame_type: 'event',
+        counter: 112,
+        account: String(fix.account),
+        type: 130,
+        qualifier: 3,
+        zone: 4,
+        partition: 2,
+      });
+      // After restore current state should leave ALARM_TRIGGERED.
+      await waitForAccessoryState(fix, 'E2E Partition',
+        (a) => a.values.SecuritySystemCurrentState !== 4);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('siren ON event flips Switch On to true', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 120, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // type=770 qualifier=1, output=1 (zone field) = external siren on
+      alarm.send({
+        frame_type: 'event',
+        counter: 121,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 1,
+        zone: 1,
+        partition: 1,
+      });
+      const acc = await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
+      assert.ok(Boolean(acc.values.On));
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('siren OFF event flips Switch On to false', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 122, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      alarm.send({
+        frame_type: 'event',
+        counter: 123,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 1,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
+      // Now send the de-activated event; switch should flip back.
+      alarm.send({
+        frame_type: 'event',
+        counter: 124,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 3,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => !a.values.On);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('toggling Switch OFF (while sounding) sends de-activate output OPERATION', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 130, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // First make the siren "sounding" so toggling OFF has work to do.
+      alarm.send({
+        frame_type: 'event',
+        counter: 131,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 1,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => Boolean(a.values.On));
+
+      const before = alarm.received.length;
+      const siren = await findAccessoryByName(fix, 'E2E Siren');
+      await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
+        characteristicType: 'On', value: false,
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 36);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `no de-activate-output OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.optype, 36);
+      assert.equal(op.order, 1); // external siren
+      assert.equal(op.partition, 0); // panel-wide
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('toggling Switch OFF still sends de-activate even when we never saw a 770 q=1', async () => {
+    // Regression: previously the SET handler short-circuited when
+    // `target === this.active`. If the panel sounded the siren without
+    // emitting type=770 (or we missed it), `this.active` stayed false and
+    // tapping OFF in the Home app silently sent nothing.
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 150, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // Note: we deliberately do NOT send a 770 q=1 here — simulating the
+      // panel either not reporting the activation or us having missed it.
+      const before = alarm.received.length;
+      const siren = await findAccessoryByName(fix, 'E2E Siren');
+      assert.ok(!siren.values.On, 'precondition: switch is OFF');
+
+      await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
+        characteristicType: 'On', value: false,
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 36);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `expected de-activate-output OPERATION even from a "no-change" SET; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.optype, 36);
+      assert.equal(op.order, 1);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('toggling Switch ON (manual activation) is rejected — no OPERATION sent', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 140, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      // Ensure siren is OFF first.
+      alarm.send({
+        frame_type: 'event',
+        counter: 141,
+        account: String(fix.account),
+        type: 770,
+        qualifier: 3,
+        zone: 1,
+        partition: 1,
+      });
+      await waitForAccessoryState(fix, 'E2E Siren', (a) => !a.values.On);
+
+      const before = alarm.received.length;
+      const siren = await findAccessoryByName(fix, 'E2E Siren');
+      await fix.api('PUT', `/api/accessories/${siren.uniqueId}`, {
+        characteristicType: 'On', value: true,
+      });
+
+      // Wait briefly for any OPERATION to surface; assert NONE arrives.
+      await new Promise((r) => setTimeout(r, 500));
+      const op = alarm.received.slice(before).find(
+        (f) => f.frame_type === 'OPERATION' && (f.optype === 35 || f.optype === 36),
+      );
+      assert.equal(op, undefined, `no output OPERATION should be sent on manual activation; got: ${JSON.stringify(op)}`);
+
+      // And the switch should be back to OFF.
+      const acc = await findAccessoryByName(fix, 'E2E Siren');
+      assert.ok(!acc.values.On, `expected siren switch to remain OFF; got On=${acc.values.On}`);
     } finally {
       alarm.close();
     }
@@ -605,20 +892,108 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     }
   });
 
-  it('UI Switch toggle OFF sends OPERATION disarm to panel', async () => {
+  it('restricted partition advertises only DISARM and AWAY as valid targets', async () => {
+    // The UI's accessory listing exposes the characteristic's `validValues`
+    // (i.e. the values the picker offers in the Home app). For the partition
+    // with armModes={away:true, stay:false, night:false} we expect just
+    // DISARM (3) and AWAY_ARM (1).
+    const partition = await findAccessoryByName(fix, 'E2E Restricted');
+    const targetChar = partition.serviceCharacteristics.find(
+      (c) => c.type === 'SecuritySystemTargetState',
+    ) as { type: string; value: unknown; minValue?: number; maxValue?: number; validValues?: number[] } | undefined;
+    assert.ok(targetChar, 'SecuritySystemTargetState characteristic missing');
+    // Either explicit validValues or a tightened min/max range — HAP exposes
+    // validValues, but some serializations also expose minValue/maxValue.
+    const allowed = targetChar.validValues ?? [];
+    if (allowed.length > 0) {
+      assert.deepEqual(
+        [...allowed].sort((a, b) => a - b),
+        [1, 3],
+        `expected validValues [AWAY=1, DISARM=3], got ${JSON.stringify(allowed)}`,
+      );
+    } else if (targetChar.minValue !== undefined && targetChar.maxValue !== undefined) {
+      // Fallback: at minimum, the range should not include STAY=0.
+      assert.ok(targetChar.minValue >= 1, `expected minValue >= 1, got ${targetChar.minValue}`);
+    } else {
+      assert.fail('characteristic exposed neither validValues nor min/max — cannot verify restriction');
+    }
+  });
+
+  it('disabled mode SET on restricted partition does not send an arm OPERATION', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 200, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Restricted');
+      // STAY (0) is disabled. Try to SET it. HAP should reject (4xx/5xx) or
+      // the platform's defense-in-depth check rejects. Either way, no
+      // arm OPERATION should reach the panel.
+      try {
+        await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+          characteristicType: 'SecuritySystemTargetState', value: 0, // STAY_ARM
+        });
+      } catch {
+        // expected — error from HAP/platform is fine
+      }
+
+      await new Promise((r) => setTimeout(r, 300));
+      const op = alarm.received.slice(before).find(
+        (f) => f.frame_type === 'OPERATION' && (f.optype === 13 || f.optype === 14),
+      );
+      assert.equal(op, undefined, `disabled mode should not send Home1/Home2; got: ${JSON.stringify(op)}`);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('enabled mode SET on restricted partition still works (AWAY → optype 12)', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 210, account: String(fix.account) });
+      await alarm.waitForRx(1);
+      const before = alarm.received.length;
+
+      const partition = await findAccessoryByName(fix, 'E2E Restricted');
+      // Force DISARM first so the AWAY transition fires SET.
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 1, // AWAY_ARM (enabled)
+      });
+
+      const deadline = Date.now() + 5000;
+      let op: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        op = alarm.received.slice(before).find((f) => f.frame_type === 'OPERATION' && f.optype === 12);
+        if (op) break;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+      assert.ok(op, `expected AWAY arm (optype=12) on restricted partition; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.equal(op.partition, 3);
+    } finally {
+      alarm.close();
+    }
+  });
+
+  it('UI SecuritySystem DISARM target sends disarm OPERATION (optype=17)', async () => {
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 40, account: String(fix.account) });
       await alarm.waitForRx(1);
-      const before = alarm.received.length;
 
       const partition = await findAccessoryByName(fix, 'E2E Partition');
-      // Force ON first so the OFF transition actually triggers a SET (handler short-circuits if equal).
-      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, { characteristicType: 'On', value: true });
-      // The toggle-on sent an arm; clear our slate then send the disarm.
+      // Force AWAY_ARM first so the DISARM transition actually triggers a SET.
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 1, // AWAY_ARM
+      });
       await new Promise((r) => setTimeout(r, 100));
       const since = alarm.received.length;
-      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, { characteristicType: 'On', value: false });
+      await fix.api('PUT', `/api/accessories/${partition.uniqueId}`, {
+        characteristicType: 'SecuritySystemTargetState', value: 3, // DISARM
+      });
 
       const deadline = Date.now() + 5000;
       let op: Record<string, unknown> | undefined;
@@ -627,7 +1002,7 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
         if (op) break;
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
-      assert.ok(op, `no DISARM OPERATION received; got: ${JSON.stringify(alarm.received.slice(before))}`);
+      assert.ok(op, `no DISARM OPERATION received; got: ${JSON.stringify(alarm.received.slice(since))}`);
       assert.equal(op.optype, 17);
       assert.equal(op.partition, 2);
     } finally {

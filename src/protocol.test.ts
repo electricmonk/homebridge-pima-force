@@ -2,9 +2,13 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
   buildAck,
+  buildDataReq,
   buildOperation,
+  dataReqFrame,
   OPTYPE_ARM,
   OPTYPE_DISARM,
+  PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_ZONE_NAMES,
   parseFrame,
   parseFrames,
   shouldAck,
@@ -113,6 +117,37 @@ describe('buildAck', () => {
   it('always sets kc:1 (purpose unknown but required)', () => {
     const ack = JSON.parse(buildAck({ frame_type: 'event', counter: 0, account: 0 }).toString('utf8'));
     assert.equal(ack.kc, 1);
+  });
+});
+
+describe('dataReqFrame / buildDataReq', () => {
+  it('serializes a zone-names request matching the spec example', () => {
+    // From spec section 4.6.4 example.
+    const buf = buildDataReq({
+      account: 9999,
+      counter: 156,
+      password: '9658',
+      id: PARAM_ID_ZONE_NAMES,
+      startOrder: 1,
+      stopOrder: 24,
+    });
+    assert.equal(
+      buf.toString('utf8'),
+      '{"frame_type":"DATA-REQ","counter":156,"account":9999,"password":"9658","id":260,"start_order":1,"stop_order":24}',
+    );
+  });
+
+  it('omits stop_order when not provided', () => {
+    const obj = dataReqFrame({
+      account: 1234,
+      counter: 5,
+      password: '1111',
+      id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+      startOrder: 1,
+    });
+    assert.equal(obj.stop_order, undefined);
+    assert.equal(obj.id, PARAM_ID_NUMBER_OF_INSTALLED_ZONES);
+    assert.equal(obj.start_order, 1);
   });
 });
 
