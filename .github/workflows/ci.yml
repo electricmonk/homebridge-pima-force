@@ -42,16 +42,35 @@ jobs:
       - run: npm run test:integration
       - run: npm run test:e2e
 
+  check-changes:
+      name: Check for code changes
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      runs-on: ubuntu-latest
+      outputs:
+        code: ${{ steps.filter.outputs.code }}
+      steps:
+        - uses: actions/checkout@v4
+        - uses: dorny/paths-filter@v3
+          id: filter
+          with:
+            filters: |
+              code:
+                - 'src/**'
+                - 'package.json'
+                - 'package-lock.json'
+                - 'tsconfig.json'
+                - 'config.schema.json'
   release:
-    name: Bump and publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: test
+    name: Bump and tag
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.check-changes.outputs.code == 'true'
+    needs: [test, check-changes]
     runs-on: ubuntu-latest
     permissions:
       # Push the version bump + tag back to master.
       contents: write
-      # Required for npm provenance + Trusted Publisher OIDC token exchange.
-      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,10 +83,6 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # Use current LTS for publish (this job doesn't run user code) so
-          # we get an npm CLI new enough for Trusted Publishing — TP needs
-          # npm 11.5+. The test job still exercises Node 20 to honor
-          # package.json `engines.node: ">=20"`.
           node-version: '24.x'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
@@ -90,12 +105,3 @@ jobs:
           git push origin HEAD:master
           git push origin "$new_version"
           echo "Released $new_version"
-
-      - name: Build
-        run: npm run build
-      - name: Publish to npm with provenance (OIDC)
-        # No NODE_AUTH_TOKEN env: with `id-token: write` and a Trusted
-        # Publisher configured on npm for this repo, the npm CLI exchanges
-        # the GitHub OIDC token for a short-lived publish token at the
-        # registry. --provenance attaches a verifiable build attestation.
-        run: npm publish --provenance --access public
