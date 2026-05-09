@@ -36,6 +36,7 @@
     "test:integration": "node --import tsx --test src/driver.test.ts",
     "test:e2e": "npm run hb:dev:link && npm run build && node --import tsx --test src/e2e.test.ts"
   },
+  "license": "LGPL-3.0-or-later",
   "keywords": [
     "homebridge-plugin",
     "pima",
