@@ -86,8 +86,6 @@ jobs:
           # so we can include [skip ci] and push commit + tag in one shot.
           new_version=$(npm version patch --no-git-tag-version)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-          git add package.json package-lock.json
-          git commit -m "chore(release): $new_version [skip ci]"
           git tag -a "$new_version" -m "$new_version"
           git push origin HEAD:master
           git push origin "$new_version"
@@ -95,22 +93,6 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: Debug OIDC claims (compare against npm TP config)
-        # ACTIONS_ID_TOKEN_REQUEST_TOKEN/URL are auto-provided because the
-        # job has `id-token: write`. Decoding the JWT payload reveals the
-        # claims (repository, workflow_ref, sub, environment, ...) that
-        # npm's Trusted Publisher matches against — useful when publish
-        # fails with a misleading 404.
-        run: |
-          token=$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
-            | python3 -c 'import sys, json; print(json.load(sys.stdin)["value"])')
-          payload=$(echo "$token" | cut -d. -f2)
-          pad=$((4 - ${#payload} % 4)); [ $pad -lt 4 ] && payload="$payload$(printf '=%.0s' $(seq 1 $pad))"
-          echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool
-
       - name: Publish to npm with provenance (OIDC)
         # No NODE_AUTH_TOKEN env: with `id-token: write` and a Trusted
         # Publisher configured on npm for this repo, the npm CLI exchanges

@@ -22,10 +22,12 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "config.schema.json"
+    "config.schema.json",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc",
+    "version": "conventional-changelog -p conventionalcommits && git add CHANGELOG.md",
     "cli": "tsx src/cli.ts",
     "hb:dev:link": "ln -sfn .. node_modules/homebridge-pima-force",
     "hb:dev": "npm run hb:dev:link && npm run build && npx hb-service run -U ./hb-dev -P .",
@@ -49,6 +51,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "conventional-changelog": "^7.2.0",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
     "homebridge": "^1.8.0",
     "homebridge-config-ui-x": "^5.22.0",
     "tsx": "^4.19.0",
