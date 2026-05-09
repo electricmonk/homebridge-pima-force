@@ -86,7 +86,6 @@ jobs:
           # so we can include [skip ci] and push commit + tag in one shot.
           new_version=$(npm version patch --no-git-tag-version)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-          npx --yes conventional-changelog-cli -p angular -i CHANGELOG.md -s
           git add package.json package-lock.json CHANGELOG.md
           git commit -m "chore(release): $new_version [skip ci]"
           git tag -a "$new_version" -m "$new_version"
