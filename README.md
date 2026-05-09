@@ -166,7 +166,7 @@ Per-partition `armModes` toggles correspond to those three armed states (`away`,
 
 - Per-partition Security System accessory; tracks AWAY / STAY / NIGHT / DISARM and ALARM_TRIGGERED on burglary events.
 - Per-zone HomeKit sensor of the configured type (contact / motion / leak / smoke).
-- Global Speaker for the external siren — toggle off to mute an active siren.
+- Global Switch for the external siren — toggle off to mute an active siren (turning it on from HomeKit is rejected; the plugin won't sound the siren on demand).
 - State sync from any source (keypad, monitoring station, mobile app) reflected in HomeKit, not only changes initiated from the plugin.
 - Graceful handling of events from unconfigured partitions / zones — logged once, never crash.
 - Optional `debug` mode logs every JSON frame in / out of the panel (passwords redacted).
