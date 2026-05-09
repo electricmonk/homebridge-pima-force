@@ -1,3 +1,9 @@
+## [0.1.10](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.8...v0.1.10) (2026-05-09)
+
+### Features
+
+* add CHANGELOG.md and automated changelog generation ([dc3cb0f](https://github.com/electricmonk/homebridge-pima-force/commit/dc3cb0f392da68c30a2eb5ecc3bbb989da6989e9))
+
 # Changelog
 
 All notable changes to `homebridge-pima-force` will be documented in this file.
