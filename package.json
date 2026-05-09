@@ -22,10 +22,12 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "config.schema.json"
+    "config.schema.json",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc",
+    "changelog": "npx --yes conventional-changelog-cli -p angular -i CHANGELOG.md -s",
     "cli": "tsx src/cli.ts",
     "hb:dev:link": "ln -sfn .. node_modules/homebridge-pima-force",
     "hb:dev": "npm run hb:dev:link && npm run build && npx hb-service run -U ./hb-dev -P .",
