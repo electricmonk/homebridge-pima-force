@@ -99,12 +99,55 @@ interface E2EFixture {
   stop(): Promise<void>;
 }
 
-async function setupE2E(): Promise<E2EFixture> {
+interface SetupOpts {
+  /** Pre-existing storage dir (used for restart scenarios). When omitted, a fresh dir is created. */
+  storage?: string;
+  /** Override for the PimaForce platform entry in config.json. Used to test legacy schemas. */
+  pimaPlatformOverride?: Record<string, unknown>;
+  /** When true, stop() preserves the storage dir on teardown (caller must clean up). */
+  keepStorage?: boolean;
+}
+
+async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
   const uiPort = await getFreePort();
   const bridgePort = await getFreePort();
   const alarmPort = await getFreePort();
   const account = 1234;
-  const storage = mkdtempSync(join(tmpdir(), 'hbpima-e2e-'));
+  const storage = opts.storage ?? mkdtempSync(join(tmpdir(), 'hbpima-e2e-'));
+
+  const defaultPima = {
+    platform: 'PimaForce',
+    name: 'Pima E2E',
+    port: alarmPort,
+    account,
+    siren: { enabled: true, name: 'E2E Siren' },
+    partitions: [
+      {
+        id: 2,
+        name: 'E2E Partition',
+        userCode: '0000',
+      },
+      {
+        // Used to test the per-partition armModes toggle: AWAY enabled,
+        // STAY and NIGHT disabled, so HomeKit picker should expose only
+        // DISARM and AWAY for this partition.
+        id: 3,
+        name: 'E2E Restricted',
+        userCode: '0000',
+        armModes: { away: true, stay: false, night: false },
+      },
+    ],
+    zones: [
+      { zone: 3, name: 'E2E Motion', type: 'motion' },
+      { zone: 4, name: 'E2E Door', type: 'contact' },
+      { zone: 5, name: 'E2E Leak', type: 'leak' },
+      { zone: 6, name: 'E2E Smoke', type: 'smoke' },
+    ],
+  };
+  // Override fixes the alarmPort regardless (each setup gets a fresh port).
+  const pimaEntry = opts.pimaPlatformOverride
+    ? { ...opts.pimaPlatformOverride, platform: 'PimaForce', port: alarmPort, account }
+    : defaultPima;
 
   const config = {
     bridge: {
@@ -127,35 +170,7 @@ async function setupE2E(): Promise<E2EFixture> {
         auth: 'none',
         theme: 'auto',
       },
-      {
-        platform: 'PimaForce',
-        name: 'Pima E2E',
-        port: alarmPort,
-        account,
-        siren: { enabled: true, name: 'E2E Siren' },
-        partitions: [
-          {
-            id: 2,
-            name: 'E2E Partition',
-            userCode: '0000',
-            zones: [
-              { zone: 3, name: 'E2E Motion', type: 'motion' },
-              { zone: 4, name: 'E2E Door', type: 'contact' },
-              { zone: 5, name: 'E2E Leak', type: 'leak' },
-              { zone: 6, name: 'E2E Smoke', type: 'smoke' },
-            ],
-          },
-          {
-            // Used to test the per-partition armModes toggle: AWAY enabled,
-            // STAY and NIGHT disabled, so HomeKit picker should expose only
-            // DISARM and AWAY for this partition.
-            id: 3,
-            name: 'E2E Restricted',
-            userCode: '0000',
-            armModes: { away: true, stay: false, night: false },
-          },
-        ],
-      },
+      pimaEntry,
     ],
   };
   // Pre-seed auth.json with an admin user so the /api/auth/noauth endpoint

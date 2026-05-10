@@ -101,41 +101,42 @@
                   "default": true
                 }
               }
+            }
+          }
+        }
+      },
+      "zones": {
+        "title": "Zones",
+        "type": "array",
+        "description": "Each zone on the panel exposed as a HomeKit sensor. The plugin auto-populates this list on first connect by querying zone names from the panel; you only need to set the sensor type. New zones added to the panel later are appended automatically.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "zone": {
+              "title": "Zone Number",
+              "type": "integer",
+              "required": true,
+              "minimum": 1,
+              "description": "Zone number on the panel."
             },
-            "zones": {
-              "title": "Zones",
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "zone": {
-                    "title": "Zone Number",
-                    "type": "integer",
-                    "required": true,
-                    "minimum": 1,
-                    "description": "Zone number on the panel."
-                  },
-                  "name": {
-                    "title": "Display Name",
-                    "type": "string",
-                    "required": true,
-                    "description": "Shown in HomeKit (e.g., 'Front Door', 'Living Room Motion')."
-                  },
-                  "type": {
-                    "title": "Sensor Type",
-                    "type": "string",
-                    "required": true,
-                    "default": "contact",
-                    "oneOf": [
-                      { "title": "Contact (door/window)", "enum": ["contact"] },
-                      { "title": "Motion", "enum": ["motion"] },
-                      { "title": "Water Leak", "enum": ["leak"] },
-                      { "title": "Smoke", "enum": ["smoke"] }
-                    ],
-                    "description": "How this zone is exposed in HomeKit. The panel-side semantics are identical (active/restored); the type only affects the HomeKit icon and which automation primitives it offers."
-                  }
-                }
-              }
+            "name": {
+              "title": "Display Name",
+              "type": "string",
+              "required": true,
+              "description": "Shown in HomeKit (e.g., 'Front Door', 'Living Room Motion')."
+            },
+            "type": {
+              "title": "Sensor Type",
+              "type": "string",
+              "required": true,
+              "default": "contact",
+              "oneOf": [
+                { "title": "Contact (door/window)", "enum": ["contact"] },
+                { "title": "Motion", "enum": ["motion"] },
+                { "title": "Water Leak", "enum": ["leak"] },
+                { "title": "Smoke", "enum": ["smoke"] }
+              ],
+              "description": "How this zone is exposed in HomeKit. The panel-side semantics are identical (active/restored); the type only affects the HomeKit icon and which automation primitives it offers."
             }
           }
         }

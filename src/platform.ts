@@ -1,3 +1,4 @@
+import { promises as fsp } from 'node:fs';
 import type {
   API,
   DynamicPlatformPlugin,
@@ -7,7 +8,7 @@ import type {
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
-import { OUTPUT_EXTERNAL_SIREN } from './protocol.js';
+import { OUTPUT_EXTERNAL_SIREN, PARAM_ID_NUMBER_OF_INSTALLED_ZONES, PARAM_ID_ZONE_NAMES } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
@@ -21,11 +22,14 @@ interface ZoneConfig {
 
 const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
 const DEFAULT_SIREN_NAME = 'Alarm Siren';
+const ZONE_DISCOVERY_TIMEOUT_MS = 5000;
+const ZONE_NAMES_PAGE_SIZE = 16;
 
 interface PartitionConfigEntry {
   id: number;
   name: string;
   userCode: string;
+  /** Legacy: zones used to be nested under partitions. Migrated at startup. */
   zones?: ZoneConfig[];
   /** Optional checkboxes for which HomeKit armed states to expose. */
   armModes?: { away?: boolean; stay?: boolean; night?: boolean };
@@ -40,6 +44,8 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   port?: number;
   account?: number;
   partitions?: PartitionConfigEntry[];
+  /** Top-level zones (current schema). */
+  zones?: ZoneConfig[];
   siren?: SirenConfig;
   /** When true, log every frame in/out at info level (passwords redacted). */
   debug?: boolean;
@@ -83,7 +89,10 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
     });
 
-    this.driver.on('connected',    () => log.info('alarm panel connected'));
+    this.driver.on('connected', () => {
+      log.info('alarm panel connected');
+      void this.maybeDiscoverNewZones();
+    });
     this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
 
@@ -195,15 +204,41 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.log.info(`received output event ${output} (partition ${partition}) → ${state}; no HomeKit accessory exposed for this output`);
   }
 
+  /**
+   * Read configured zones from both the current top-level shape and the
+   * legacy nested-under-partitions shape, deduped by zone number. Top-level
+   * entries win on collision so user customizations to the new schema aren't
+   * clobbered by stale nested ones.
+   */
+  private resolveConfiguredZones(): { zones: ZoneConfig[]; migrated: number } {
+    const zones = [...(this.config.zones ?? [])];
+    const seen = new Set(zones.map((z) => z.zone));
+    let migrated = 0;
+    for (const p of this.config.partitions ?? []) {
+      for (const z of p.zones ?? []) {
+        if (seen.has(z.zone)) continue;
+        zones.push({ zone: z.zone, name: z.name, type: z.type });
+        seen.add(z.zone);
+        migrated++;
+      }
+    }
+    return { zones, migrated };
+  }
+
   private discoverDevices(): void {
     const partitions = this.config.partitions ?? [];
     const desiredUuids = new Set<string>();
 
+    const { zones: flatZones, migrated } = this.resolveConfiguredZones();
+    if (migrated > 0) {
+      this.log.info(`migrated ${migrated} zone(s) from legacy nested partition.zones to flat top-level config — accessories preserved (UUIDs unchanged). Move them to a top-level "zones" array in config.json to silence this message.`);
+    }
+
     for (const partConfig of partitions) {
       desiredUuids.add(this.registerPartition(partConfig));
-      for (const zoneConfig of partConfig.zones ?? []) {
-        desiredUuids.add(this.registerZone(partConfig.id, zoneConfig));
-      }
+    }
+    for (const zoneConfig of flatZones) {
+      desiredUuids.add(this.registerZone(zoneConfig));
     }
 
     // Optional global siren accessory (single instance, output 1 by default).
@@ -258,12 +293,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     return uuid;
   }
 
-  private registerZone(partitionId: number, z: ZoneConfig): string {
+  private registerZone(z: ZoneConfig): string {
     const uuid = this.api.hap.uuid.generate(`pima-force:zone:${z.zone}`);
     const ctx: ZoneAccessoryContext = {
       kind: 'zone',
       zone: z.zone,
-      partition: partitionId,
       name: z.name,
       type: z.type ?? DEFAULT_ZONE_TYPE,
     };
@@ -278,10 +312,130 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       accessory.context = ctx;
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
-      this.log.info(`registered zone sensor: ${z.name} (zone ${z.zone}, partition ${partitionId})`);
+      this.log.info(`registered zone sensor: ${z.name} (zone ${z.zone})`);
     }
     this.zones.set(z.zone, new ZoneSensor(this, accessory));
     return uuid;
+  }
+
+  /**
+   * On every panel connect, query the panel for its zone names (param 260)
+   * and append any zones not already in config.json. Append-only — never
+   * touches existing entries (preserves user-set type/name overrides) and
+   * never deletes entries the panel doesn't currently report (a zone might
+   * be temporarily absent; user-defined entries are sacred).
+   *
+   * No-op when the panel reports no new zones — the file is only written
+   * when there's an actual delta to persist.
+   */
+  private async maybeDiscoverNewZones(): Promise<void> {
+    if (!this.config.partitions || this.config.partitions.length === 0) return;
+    try {
+      const count = await this.queryZoneCount();
+      if (!count) return;
+      const names = await this.queryZoneNames(count);
+
+      const known = new Set<number>();
+      for (const z of this.config.zones ?? []) known.add(z.zone);
+      for (const p of this.config.partitions ?? []) {
+        for (const z of p.zones ?? []) known.add(z.zone);
+      }
+
+      const newZones: ZoneConfig[] = [];
+      for (const [zone, name] of names) {
+        const trimmed = name.trim();
+        if (!trimmed) continue;
+        if (known.has(zone)) continue;
+        newZones.push({ zone, name: trimmed, type: DEFAULT_ZONE_TYPE });
+      }
+
+      if (newZones.length === 0) {
+        this.log.debug('zone discovery: no new zones to add');
+        return;
+      }
+
+      this.log.info(`zone discovery: appending ${newZones.length} new zone(s) to config.json: ${newZones.map((z) => `${z.zone} "${z.name}"`).join(', ')}`);
+      await this.appendZonesToConfig(newZones);
+      this.log.info('zone discovery: config.json updated. Adjust the sensor type for each new zone in the plugin settings; Homebridge will reload the config and expose them as HomeKit accessories.');
+    } catch (err) {
+      this.log.warn(`zone discovery skipped: ${(err as Error).message}`);
+    }
+  }
+
+  private queryZoneCount(): Promise<number> {
+    return this.requestParameter(PARAM_ID_NUMBER_OF_INSTALLED_ZONES, 1, 1).then((p) => Number(p[0] ?? 0));
+  }
+
+  private async queryZoneNames(count: number): Promise<Map<number, string>> {
+    const names = new Map<number, string>();
+    let cursor = 1;
+    while (cursor <= count) {
+      const stop = Math.min(cursor + ZONE_NAMES_PAGE_SIZE - 1, count);
+      const params = await this.requestParameter(PARAM_ID_ZONE_NAMES, cursor, stop);
+      params.forEach((name, i) => names.set(cursor + i, name));
+      cursor = stop + 1;
+    }
+    return names;
+  }
+
+  /**
+   * Issue a DATA-REQ and resolve with the matching DATA event's parameters.
+   * Rejects on any NAK in the meantime (panel emits counter=0 NAKs that we
+   * can't match precisely — treating any in-flight NAK as ours is good enough
+   * here because discovery is the only thing we run on connect).
+   */
+  private requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        this.driver.off('data', dataHandler);
+        this.driver.off('nak', nakHandler);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`timeout waiting for DATA id=${id} start=${startOrder}`));
+      }, ZONE_DISCOVERY_TIMEOUT_MS);
+      const dataHandler = (msg: { id: number; startOrder: number; parameters: string[] }): void => {
+        if (msg.id === id && msg.startOrder === startOrder) {
+          cleanup();
+          resolve(msg.parameters);
+        }
+      };
+      const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
+        cleanup();
+        reject(new Error(`panel NAK: ${reason} (counter=${counter ?? '?'})`));
+      };
+      this.driver.on('data', dataHandler);
+      this.driver.on('nak', nakHandler);
+      this.driver.requestData({ id, startOrder, stopOrder }).catch((err) => {
+        cleanup();
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Atomically append new zones to our slice of config.json. Writes to a
+   * sibling temp file and renames into place to prevent leaving config.json
+   * partially written if the process dies mid-write. homebridge-config-ui-x
+   * watches config.json and reloads automatically.
+   */
+  private async appendZonesToConfig(newZones: ZoneConfig[]): Promise<void> {
+    const path = this.api.user.configPath();
+    const text = await fsp.readFile(path, 'utf8');
+    const json = JSON.parse(text) as { platforms?: Array<Record<string, unknown>> };
+    const platforms = Array.isArray(json.platforms) ? json.platforms : [];
+    const myEntry = platforms.find((p) => p.platform === PLATFORM_NAME);
+    if (!myEntry) {
+      this.log.warn(`zone discovery: could not find platform "${PLATFORM_NAME}" in config.json; skipping write`);
+      return;
+    }
+    const existing = Array.isArray(myEntry.zones) ? (myEntry.zones as ZoneConfig[]) : [];
+    myEntry.zones = [...existing, ...newZones];
+
+    const tmp = `${path}.pima-force.tmp.${process.pid}`;
+    await fsp.writeFile(tmp, JSON.stringify(json, null, 4));
+    await fsp.rename(tmp, path);
   }
 
   private registerSiren(name: string): string {
