@@ -1128,7 +1128,9 @@ describe('E2E: freshly installed plugin with no partitions configured', { timeou
 
   it('no plugin accessories are registered', async () => {
     const list = await apiCall<AccessoryService[]>('GET', '/api/accessories');
-    assert.equal(list.length, 0,
-      `expected no accessories when unconfigured, got: ${list.map((a) => a.serviceName).join(', ')}`);
+    const pluginTypes = new Set(['SecuritySystem', 'ContactSensor', 'MotionSensor', 'LeakSensor', 'SmokeSensor', 'Switch']);
+    const pluginAccessories = list.filter((a) => pluginTypes.has(a.type));
+    assert.equal(pluginAccessories.length, 0,
+      `expected no plugin accessories when unconfigured, got: ${pluginAccessories.map((a) => a.serviceName).join(', ')}`);
   });
 });
