@@ -2,6 +2,7 @@
 /**
  * Interactive CLI around PimaDriver. Logs every event in a readable form
  * and accepts arm/disarm/output commands from stdin.
+ * Useful for development purposes.
  *
  * Usage:
  *   PIMA_P1_CODE=xxxx PIMA_P2_CODE=yyyy npm run cli
