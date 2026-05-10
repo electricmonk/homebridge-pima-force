@@ -224,6 +224,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       for (const acc of stale) this.cachedAccessories.delete(acc.UUID);
     }
 
+    if (partitions.length === 0) {
+      this.log.warn('No partitions configured — not starting driver. Open the plugin settings to add at least one partition.');
+      return;
+    }
+
     this.driver.start().catch((err) => {
       this.log.error(`failed to start driver: ${(err as Error).message}`);
     });
