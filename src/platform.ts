@@ -409,14 +409,14 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
   /**
    * Issue a DATA-REQ and resolve with the matching DATA event's parameters.
-   * Rejects on any NAK in the meantime (panel emits counter=0 NAKs that we
-   * can't match precisely — treating any in-flight NAK as ours is good enough
-   * here because discovery is the only thing we run on connect).
+   * Rejects only on NAKs whose counter matches our in-flight request, so
+   * unrelated NAKs (e.g. from a concurrent arm/disarm operation) are ignored.
    */
   private requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
     return new Promise((resolve, reject) => {
       const allParams: string[] = [];
       let nextStart = startOrder;
+      let inflightCounter: number | undefined;
 
       const cleanup = (): void => {
         clearTimeout(timer);
@@ -437,18 +437,24 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         }
         // Panel split the response; request the next fragment.
         nextStart = startOrder + allParams.length;
-        this.driver.requestData({ id, startOrder: nextStart, stopOrder }).catch((err) => {
+        this.driver.requestData({ id, startOrder: nextStart, stopOrder }).then((c) => {
+          inflightCounter = c;
+        }).catch((err) => {
           cleanup();
           reject(err);
         });
       };
       const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
+        // Ignore NAKs that don't match our in-flight counter (e.g. concurrent arm/disarm).
+        if (inflightCounter !== undefined && counter !== undefined && counter !== inflightCounter) return;
         cleanup();
         reject(new Error(`panel NAK: ${reason} (counter=${counter ?? '?'})`));
       };
       this.driver.on('data', dataHandler);
       this.driver.on('nak', nakHandler);
-      this.driver.requestData({ id, startOrder, stopOrder }).catch((err) => {
+      this.driver.requestData({ id, startOrder, stopOrder }).then((c) => {
+        inflightCounter = c;
+      }).catch((err) => {
         cleanup();
         reject(err);
       });
@@ -466,13 +472,17 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     const text = await fsp.readFile(path, 'utf8');
     const json = JSON.parse(text) as { platforms?: Array<Record<string, unknown>> };
     const platforms = Array.isArray(json.platforms) ? json.platforms : [];
-    const myEntry = platforms.find((p) => p.platform === PLATFORM_NAME);
-    if (!myEntry) {
-      this.log.warn(`zone discovery: could not find platform "${PLATFORM_NAME}" in config.json; skipping write`);
+    const matches = platforms.filter((p) => p.platform === PLATFORM_NAME);
+    if (matches.length !== 1) {
+      this.log.warn(`zone discovery: expected exactly 1 "${PLATFORM_NAME}" platform in config.json; found ${matches.length}; skipping write`);
       return;
     }
-    const existing = Array.isArray(myEntry.zones) ? (myEntry.zones as ZoneConfig[]) : [];
-    const existingNums = new Set(existing.map((z: ZoneConfig) => z.zone));
+    const myEntry = matches[0];
+    const rawZones = Array.isArray(myEntry.zones) ? myEntry.zones : [];
+    const existing = rawZones.filter(
+      (z): z is ZoneConfig => typeof z === 'object' && z !== null && typeof (z as ZoneConfig).zone === 'number',
+    );
+    const existingNums = new Set(existing.map((z) => z.zone));
     const toAppend = newZones.filter((z) => !existingNums.has(z.zone));
     if (toAppend.length === 0) return;
     myEntry.zones = [...existing, ...toAppend];

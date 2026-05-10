@@ -267,6 +267,13 @@ describe('PimaDriver — send side (arm/disarm)', () => {
     assert.equal(h!.rxFromDriver[0].password, '9999');
     assert.equal(h!.rxFromDriver[0].id, 260);
   });
+
+  it('requestData resolves with the counter used in the DATA-REQ frame', async () => {
+    const counter = await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 1 });
+    await waitForRx(h!, 1);
+    assert.equal(typeof counter, 'number', 'requestData should resolve with a number');
+    assert.equal(counter, h!.rxFromDriver[0].counter, 'resolved counter should match the counter sent in the DATA-REQ');
+  });
 });
 
 describe('PimaDriver — requestData password override', () => {

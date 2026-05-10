@@ -126,7 +126,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * the panel rejects). Authorization uses the first configured partition's
    * user code, same as output operations.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<void> {
+  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<number> {
     const part = this.config.partitions[0];
     if (!part && !params.password) {
       return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
@@ -145,17 +145,17 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
         stopOrder: params.stopOrder,
       };
       this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve(reqParams.counter)));
     });
   }
 
   /** Convenience: request the panel's zone names (parameter id 260). */
-  getZoneNames(startOrder = 1, stopOrder?: number): Promise<void> {
+  getZoneNames(startOrder = 1, stopOrder?: number): Promise<number> {
     return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
   }
 
   /** Convenience: request the count of installed zones (parameter id 2148). */
-  getZoneCount(): Promise<void> {
+  getZoneCount(): Promise<number> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
   }
 

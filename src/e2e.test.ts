@@ -84,8 +84,8 @@ interface FakeAlarm {
   received: Array<Record<string, unknown>>;
   /** Resolve when at least N frames received from the driver. */
   waitForRx(n: number, timeoutMs?: number): Promise<void>;
-  /** Resolve with the next DATA-REQ frame the driver sends matching `id`. */
-  waitForDataReq(opts: { id: number; timeoutMs?: number }): Promise<Record<string, unknown>>;
+  /** Resolve with the next DATA-REQ frame the driver sends matching `id` (and optionally `startOrder`). */
+  waitForDataReq(opts: { id: number; startOrder?: number; timeoutMs?: number }): Promise<Record<string, unknown>>;
   close(): void;
 }
 
@@ -293,14 +293,18 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
           await new Promise((r) => setTimeout(r, 10));
         }
       };
-      const waitForDataReq = async (opts: { id: number; timeoutMs?: number }) => {
+      const waitForDataReq = async (opts: { id: number; startOrder?: number; timeoutMs?: number }) => {
         const d = Date.now() + (opts.timeoutMs ?? 3000);
         while (Date.now() < d) {
-          const found = dataReqs.find((f) => Number(f.id) === opts.id);
+          const found = dataReqs.find(
+            (f) => Number(f.id) === opts.id &&
+              (opts.startOrder === undefined || Number(f.start_order) === opts.startOrder),
+          );
           if (found) return found;
           await new Promise((r) => setTimeout(r, 10));
         }
-        throw new Error(`timeout waiting for DATA-REQ id=${opts.id}; got: ${JSON.stringify(dataReqs)}`);
+        const startDesc = opts.startOrder !== undefined ? ` start_order=${opts.startOrder}` : '';
+        throw new Error(`timeout waiting for DATA-REQ id=${opts.id}${startDesc}; got: ${JSON.stringify(dataReqs)}`);
       };
       const close = () => sock.destroy();
       resolve({ send, received, waitForRx, waitForDataReq, close });
@@ -1244,6 +1248,156 @@ describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () =>
       for (const z of zones) {
         assert.equal(z.type, 'contact', `zone ${z.zone} should default to contact; got ${z.type}`);
       }
+    } finally {
+      alarm.close();
+    }
+  });
+});
+
+describe('E2E: zone auto-discovery — paginated zone names', { timeout: 30_000 }, () => {
+  const partitionOnlyConfig = {
+    name: 'Pima Discovery Paginated',
+    siren: { enabled: false },
+    partitions: [
+      { id: 1, name: 'Discovery Partition', userCode: '0000' },
+    ],
+  };
+
+  let fix: E2EFixture;
+
+  before(async () => {
+    fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
+    await waitForAccessories(fix, ['Discovery Partition']);
+  });
+  after(async () => { await fix?.stop(); });
+
+  it('aggregates zone names split across multiple DATA frames (more: yes)', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+
+      // Zone count: 4 zones total.
+      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
+        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
+      });
+      alarm.send({
+        frame_type: 'DATA',
+        counter: countReq.counter,
+        account: String(fix.account),
+        id: 2148,
+        start_order: 1,
+        parameters: ['4'],
+        more: 'no',
+      });
+
+      // First page of names: zones 1–3, panel says more is coming.
+      const namesReq1 = await alarm.waitForDataReq({ id: 260, startOrder: 1 });
+      assert.equal(namesReq1.start_order, 1, `first page should start at 1; got ${JSON.stringify(namesReq1)}`);
+      alarm.send({
+        frame_type: 'DATA',
+        counter: namesReq1.counter,
+        account: String(fix.account),
+        id: 260,
+        start_order: 1,
+        parameters: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
+        more: 'yes',
+      });
+
+      // Second page: zone 4, no more.
+      const namesReq2 = await alarm.waitForDataReq({ id: 260, startOrder: 4 });
+      assert.equal(namesReq2.start_order, 4, `second page should start at 4; got ${JSON.stringify(namesReq2)}`);
+      alarm.send({
+        frame_type: 'DATA',
+        counter: namesReq2.counter,
+        account: String(fix.account),
+        id: 260,
+        start_order: 4,
+        parameters: ['Garage Motion'],
+        more: 'no',
+      });
+
+      await waitForAccessories(fix, ['Front Door', 'Living Room PIR', 'Kitchen Smoke', 'Garage Motion']);
+
+      const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
+      const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
+      const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
+        | { zones?: Array<{ zone: number; name: string; type: string }> }
+        | undefined;
+      assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
+      const zones = myEntry!.zones ?? [];
+      const byZone = new Map(zones.map((z) => [z.zone, z]));
+      assert.equal(zones.length, 4, `expected 4 zones written to config.json; got ${zones.length}: ${JSON.stringify(zones)}`);
+      assert.equal(byZone.get(1)?.name, 'Front Door');
+      assert.equal(byZone.get(2)?.name, 'Living Room PIR');
+      assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
+      assert.equal(byZone.get(4)?.name, 'Garage Motion');
+    } finally {
+      alarm.close();
+    }
+  });
+});
+
+describe('E2E: zone auto-discovery — NAK counter correlation', { timeout: 30_000 }, () => {
+  const partitionOnlyConfig = {
+    name: 'Pima Discovery NAK',
+    siren: { enabled: false },
+    partitions: [
+      { id: 1, name: 'Discovery Partition', userCode: '0000' },
+    ],
+  };
+
+  let fix: E2EFixture;
+
+  before(async () => {
+    fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
+    await waitForAccessories(fix, ['Discovery Partition']);
+  });
+  after(async () => { await fix?.stop(); });
+
+  it('ignores an unrelated NAK (different counter) during discovery', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+
+      // Plugin sends a DATA-REQ for zone count.
+      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
+        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
+      });
+
+      // Simulate the panel NAKing some *other* command with a different counter.
+      const unrelatedCounter = (countReq.counter as number) + 99;
+      alarm.send({
+        frame_type: 'NAK',
+        counter: unrelatedCounter,
+        account: String(fix.account),
+        data: 'invalid password',
+      });
+
+      // Discovery should still proceed — respond with the real zone count DATA.
+      alarm.send({
+        frame_type: 'DATA',
+        counter: countReq.counter,
+        account: String(fix.account),
+        id: 2148,
+        start_order: 1,
+        parameters: ['2'],
+        more: 'no',
+      });
+
+      const namesReq = await alarm.waitForDataReq({ id: 260 }).catch((err) => {
+        throw new Error(`discovery was incorrectly aborted by unrelated NAK: ${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
+      });
+      alarm.send({
+        frame_type: 'DATA',
+        counter: namesReq.counter,
+        account: String(fix.account),
+        id: 260,
+        start_order: 1,
+        parameters: ['Porch Sensor', 'Back Door'],
+        more: 'no',
+      });
+
+      await waitForAccessories(fix, ['Porch Sensor', 'Back Door']);
     } finally {
       alarm.close();
     }
