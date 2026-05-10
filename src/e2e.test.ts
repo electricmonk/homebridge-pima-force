@@ -1110,20 +1110,27 @@ describe('E2E: freshly installed plugin with no partitions configured', { timeou
       return logBuf + '\n' + fileLog;
     };
 
-    // Give didFinishLaunching → discoverDevices() time to run before tests assert.
-    await new Promise((r) => setTimeout(r, 2000));
   });
 
   after(async () => { await stopFn?.(); });
 
   it('driver does not start — alarm port remains unbound', async () => {
-    const bound = await new Promise<boolean>((resolve) => {
-      const sock = net.createConnection({ host: '127.0.0.1', port: alarmPort });
-      sock.once('connect', () => { sock.destroy(); resolve(true); });
-      sock.once('error', () => resolve(false));
-    });
-    assert.equal(bound, false,
-      `alarm port should be unbound when no partitions are configured; logs:\n${getlogs().split('\n').slice(-20).join('\n')}`);
+    // Poll for 5 s to give discoverDevices() time to run. Fail fast if the port
+    // ever becomes bound; pass once the window closes without a connection.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const bound = await new Promise<boolean>((resolve) => {
+        const sock = net.createConnection({ host: '127.0.0.1', port: alarmPort });
+        sock.once('connect', () => { sock.destroy(); resolve(true); });
+        sock.once('error', () => resolve(false));
+      });
+      if (bound) {
+        assert.fail(
+          `alarm port became bound when no partitions are configured; logs:\n${getlogs().split('\n').slice(-20).join('\n')}`
+        );
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
   });
 
   it('no plugin accessories are registered', async () => {

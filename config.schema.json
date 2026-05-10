@@ -55,7 +55,7 @@
       "partitions": {
         "title": "Partitions",
         "type": "array",
-        "minItems": 1,
+        "minItems": 0,
         "items": {
           "type": "object",
           "properties": {
