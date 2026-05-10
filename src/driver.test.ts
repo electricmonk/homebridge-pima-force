@@ -53,6 +53,21 @@ async function setupConnected(): Promise<Harness> {
   return { driver, port: addr.port, alarm, rxFromDriver };
 }
 
+/**
+ * Like setupConnected, but also sends a heartbeat with the correct account
+ * so panelVerified flips to true before the tests run. Clears rxFromDriver
+ * so tests only see frames sent AFTER verification.
+ */
+async function setupVerified(): Promise<Harness> {
+  const h = await setupConnected();
+  const verified = once(h.driver, 'verified');
+  h.alarm.write('{"frame_type":"null","counter":1,"account":"1234"}');
+  await verified;
+  await waitForRx(h, 1); // wait for the ACK back to the alarm
+  h.rxFromDriver.splice(0); // discard the ACK; tests start with a clean slate
+  return h;
+}
+
 async function teardown(h: Harness | null): Promise<void> {
   if (!h) return;
   h.alarm.destroy();
@@ -100,6 +115,23 @@ describe('PimaDriver — connection lifecycle', () => {
       h!.alarm.once('close', () => resolve());
     });
     assert.equal(h!.alarm.destroyed, true);
+  });
+
+  it('closes connection if first frame has a non-string account', async () => {
+    const errEvt = once(h!.driver, 'error');
+    // Numeric account that numerically equals the configured account — must still be rejected.
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":1234}');
+    const [err] = await errEvt;
+    assert.match((err as Error).message, /1234/);
+    await new Promise<void>((resolve) => {
+      if (h!.alarm.destroyed) return resolve();
+      h!.alarm.once('close', () => resolve());
+    });
+    assert.equal(h!.alarm.destroyed, true);
+  });
+
+  it('arm() rejects before panel is verified', async () => {
+    await assert.rejects(h!.driver.arm(1), /not yet verified/);
   });
 
   it('emits disconnected when the alarm drops', async () => {
@@ -211,7 +243,7 @@ describe('PimaDriver — receive side', () => {
 
 describe('PimaDriver — send side (arm/disarm)', () => {
   let h: Harness | null = null;
-  beforeEach(async () => { h = await setupConnected(); });
+  beforeEach(async () => { h = await setupVerified(); });
   afterEach(async () => { await teardown(h); h = null; });
 
   it('arm(2) sends the right OPERATION frame', async () => {

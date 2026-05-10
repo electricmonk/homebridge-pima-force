@@ -193,9 +193,41 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
   private queryPartitionStates(): void {
     const partitions = this.config.partitions ?? [];
+    if (partitions.length === 0) return;
+
+    const pending = new Set(partitions.map((p) => p.id));
+
+    const tid = setTimeout(() => {
+      this.driver.off('data', listener);
+      if (pending.size > 0) {
+        this.log.warn(
+          `startup state query timed out for partition(s) ${[...pending].join(', ')} — HomeKit state may be stale until next reconnect`,
+        );
+      }
+    }, 10_000);
+    tid.unref();
+
+    const listener = ({ id, startOrder, parameters }: { id: number; startOrder: number; parameters: string[]; more: boolean }) => {
+      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
+      for (let i = 0; i < parameters.length; i++) {
+        pending.delete(startOrder + i);
+      }
+      if (pending.size === 0) {
+        clearTimeout(tid);
+        this.driver.off('data', listener);
+      }
+    };
+
+    this.driver.on('data', listener);
+
     for (const p of partitions) {
       this.driver.getSystemKeyStatus(p.id).catch((err: Error) => {
         this.log.warn(`failed to query state for partition ${p.id}: ${err.message}`);
+        pending.delete(p.id);
+        if (pending.size === 0) {
+          clearTimeout(tid);
+          this.driver.off('data', listener);
+        }
       });
     }
   }

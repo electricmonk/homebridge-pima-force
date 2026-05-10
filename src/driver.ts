@@ -139,6 +139,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
       }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
+      }
       const reqParams = {
         account: this.config.account,
         counter: this.opCounter++,
@@ -177,6 +180,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
       }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
+      }
       const reqParams = {
         account: this.config.account,
         counter: this.opCounter++,
@@ -200,6 +206,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
       }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
+      }
       const params = {
         account: this.config.account,
         counter: this.opCounter++,
@@ -218,6 +227,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       const sock = this.activeSocket;
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
+      }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
       }
       const part = this.partitionByCode.get(partition);
       if (!part) {
@@ -267,7 +279,12 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       // on the first frame. Reject and close if it doesn't match — prevents a
       // rogue TCP client from triggering DATA-REQ frames that carry user codes.
       if (!this.panelVerified) {
-        if (Number(frame.account) !== this.config.account) {
+        const rawAccount = frame.account;
+        const accountOk =
+          typeof rawAccount === 'string' &&
+          /^\d+$/.test(rawAccount) &&
+          Number(rawAccount) === this.config.account;
+        if (!accountOk) {
           this.emit('error', new Error(
             `rejected connection: account=${frame.account} does not match expected ${this.config.account}`,
           ));
