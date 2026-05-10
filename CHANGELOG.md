@@ -1,3 +1,11 @@
+## [0.1.13](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.12...v0.1.13) (2026-05-10)
+
+### Bug Fixes
+
+* address baz review comments (encoding default, reverseStrings deprecation, discovery retry) ([50a07fa](https://github.com/electricmonk/homebridge-pima-force/commit/50a07fa7528e3517a95bca190fc79db25ee6ca22))
+* address baz review comments (NAK correlation, pagination test, config safety) ([bce2d37](https://github.com/electricmonk/homebridge-pima-force/commit/bce2d3705548ee0449c444936c624fc02a92fa9a))
+* address review comments from zone-discovery PR ([ec8428f](https://github.com/electricmonk/homebridge-pima-force/commit/ec8428fcfe9f3b5ab0389c4e36793affc221328f))
+
 ## [0.1.12](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.11...v0.1.12) (2026-05-10)
 
 ### Bug Fixes
