@@ -1010,3 +1010,125 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     }
   });
 });
+
+describe('E2E: freshly installed plugin with no partitions configured', { timeout: 60_000 }, () => {
+  let uiPort: number;
+  let alarmPort: number;
+  let apiCall: E2EFixture['api'];
+  let stopFn: () => Promise<void>;
+  let getlogs: () => string;
+
+  before(async () => {
+    uiPort = await getFreePort();
+    const bridgePort = await getFreePort();
+    alarmPort = await getFreePort();
+
+    const storage = mkdtempSync(join(tmpdir(), 'hbpima-e2e-uncfg-'));
+    const config = {
+      bridge: {
+        name: 'E2E Unconfigured Bridge',
+        username: ['CC', '22', '3D', 'E3'].concat([
+          Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
+          Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
+        ]).join(':'),
+        port: bridgePort,
+        pin: '031-45-154',
+      },
+      platforms: [
+        {
+          platform: 'config',
+          name: 'Config',
+          port: uiPort,
+          auth: 'none',
+          theme: 'auto',
+        },
+        {
+          platform: 'PimaForce',
+          name: 'Pima Force Unconfigured',
+          port: alarmPort,
+          account: 1234,
+          partitions: [],
+        },
+      ],
+    };
+    const auth = [{ id: 1, username: 'admin', name: 'Admin', hashedPassword: 'x', salt: 'x', admin: true }];
+    writeFileSync(join(storage, 'config.json'), JSON.stringify(config, null, 2));
+    writeFileSync(join(storage, 'auth.json'), JSON.stringify(auth));
+
+    const child = spawn(process.execPath, [HB_SERVICE_BIN, 'run', '-U', storage, '-P', ROOT], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+    let logBuf = '';
+    child.stdout?.on('data', (b: Buffer) => { logBuf += b.toString('utf8'); });
+    child.stderr?.on('data', (b: Buffer) => { logBuf += b.toString('utf8'); });
+
+    let stopped = false;
+    stopFn = async (): Promise<void> => {
+      if (stopped) return;
+      stopped = true;
+      if (!child.killed) {
+        child.kill('SIGTERM');
+        const settled = await Promise.race([
+          once(child, 'exit').then(() => true),
+          new Promise<boolean>((r) => setTimeout(() => r(false), 5000)),
+        ]);
+        if (!settled) child.kill('SIGKILL');
+      }
+      rmSync(storage, { recursive: true, force: true });
+    };
+
+    try {
+      await waitForPort(uiPort);
+    } catch (err) {
+      await stopFn();
+      throw new Error(`setup failed: ${(err as Error).message}\n--- subprocess output ---\n${logBuf}`);
+    }
+
+    let token = '';
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const res = await httpJson<AuthResponse>('POST', `http://127.0.0.1:${uiPort}/api/auth/noauth`, {});
+        token = res.access_token;
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      }
+    }
+    if (!token) {
+      await stopFn();
+      throw new Error(`could not obtain auth token\n--- subprocess output ---\n${logBuf}`);
+    }
+
+    apiCall = <T = unknown>(method: string, path: string, body?: unknown) =>
+      httpJson<T>(method, `http://127.0.0.1:${uiPort}${path}`, body, token);
+
+    getlogs = (): string => {
+      let fileLog = '';
+      try { fileLog = readFileSync(join(storage, 'homebridge.log'), 'utf8'); } catch { /* not yet created */ }
+      return logBuf + '\n' + fileLog;
+    };
+
+    // Give didFinishLaunching → discoverDevices() time to run before tests assert.
+    await new Promise((r) => setTimeout(r, 2000));
+  });
+
+  after(async () => { await stopFn?.(); });
+
+  it('driver does not start — alarm port remains unbound', async () => {
+    const bound = await new Promise<boolean>((resolve) => {
+      const sock = net.createConnection({ host: '127.0.0.1', port: alarmPort });
+      sock.once('connect', () => { sock.destroy(); resolve(true); });
+      sock.once('error', () => resolve(false));
+    });
+    assert.equal(bound, false,
+      `alarm port should be unbound when no partitions are configured; logs:\n${getlogs().split('\n').slice(-20).join('\n')}`);
+  });
+
+  it('no plugin accessories are registered', async () => {
+    const list = await apiCall<AccessoryService[]>('GET', '/api/accessories');
+    assert.equal(list.length, 0,
+      `expected no accessories when unconfigured, got: ${list.map((a) => a.serviceName).join(', ')}`);
+  });
+});
