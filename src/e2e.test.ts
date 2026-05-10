@@ -79,10 +79,13 @@ interface AccessoryService {
 
 interface FakeAlarm {
   send(frame: Record<string, unknown>): void;
-  /** All frames received from the driver, in order. */
+  /** All frames received from the driver, in order. DATA-REQ frames are
+   * separated into their own list and not included here — see waitForDataReq. */
   received: Array<Record<string, unknown>>;
   /** Resolve when at least N frames received from the driver. */
   waitForRx(n: number, timeoutMs?: number): Promise<void>;
+  /** Resolve with the next DATA-REQ frame the driver sends matching `id`. */
+  waitForDataReq(opts: { id: number; timeoutMs?: number }): Promise<Record<string, unknown>>;
   close(): void;
 }
 
@@ -258,18 +261,21 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
   const connectAlarm = (): Promise<FakeAlarm> => new Promise((resolve, reject) => {
     const sock = net.createConnection({ host: '127.0.0.1', port: alarmPort });
     const received: Array<Record<string, unknown>> = [];
+    const dataReqs: Array<Record<string, unknown>> = [];
     sock.on('data', (buf) => {
       // The driver may emit multiple frames per chunk under TCP coalescing.
       const text = buf.toString('utf8');
       for (const part of text.split(/(?<=\})(?=\{)/)) {
         try {
           const frame = JSON.parse(part);
-          // The plugin emits a DATA-REQ on every connect to auto-discover
-          // new zones from the panel. Real panels respond with a DATA frame;
-          // these tests don't simulate that path. Drop DATA-REQ from
-          // `received` so frame-count assertions like `waitForRx(N)` aren't
-          // tripped by it. The plugin will silently time out and move on.
-          if (frame?.frame_type === 'DATA-REQ') continue;
+          // DATA-REQ frames go into their own list. Tests that don't care
+          // about discovery (most of them) ignore that list; tests that do
+          // care use waitForDataReq to await + respond. Either way, DATA-REQ
+          // doesn't pollute `received` so frame-count assertions stay clean.
+          if (frame?.frame_type === 'DATA-REQ') {
+            dataReqs.push(frame);
+            continue;
+          }
           received.push(frame);
         } catch { /* ignore */ }
       }
@@ -287,8 +293,17 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
           await new Promise((r) => setTimeout(r, 10));
         }
       };
+      const waitForDataReq = async (opts: { id: number; timeoutMs?: number }) => {
+        const d = Date.now() + (opts.timeoutMs ?? 3000);
+        while (Date.now() < d) {
+          const found = dataReqs.find((f) => Number(f.id) === opts.id);
+          if (found) return found;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        throw new Error(`timeout waiting for DATA-REQ id=${opts.id}; got: ${JSON.stringify(dataReqs)}`);
+      };
       const close = () => sock.destroy();
-      resolve({ send, received, waitForRx, close });
+      resolve({ send, received, waitForRx, waitForDataReq, close });
     });
     sock.once('error', reject);
   });
@@ -1137,6 +1152,100 @@ describe('E2E: legacy nested config migration', { timeout: 90_000 }, () => {
       );
     } finally {
       await fix.stop();
+    }
+  });
+});
+
+/**
+ * Onboarding E2E: a user installs the plugin with only partitions configured
+ * (no manual zone list). On first panel connect, the plugin must query the
+ * panel for installed zone count + zone names, append the discovered zones
+ * to config.json, and register them as HomeKit accessories in-process so
+ * they appear in the Home app immediately — no Homebridge restart required.
+ */
+describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () => {
+  const partitionOnlyConfig = {
+    name: 'Pima Discovery',
+    siren: { enabled: false },
+    partitions: [
+      { id: 1, name: 'Discovery Partition', userCode: '0000' },
+    ],
+    // Note: no zones — the plugin should populate them from the panel.
+  };
+
+  let fix: E2EFixture;
+
+  before(async () => {
+    fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
+    // The partition accessory is wired up at didFinishLaunching, before the
+    // panel ever connects. Zones aren't expected yet.
+    await waitForAccessories(fix, ['Discovery Partition']);
+  });
+  after(async () => { await fix?.stop(); });
+
+  it('queries the panel and registers each discovered zone as a HomeKit sensor', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      // Send a heartbeat first — real panels emit one immediately on
+      // connect, and the plugin uses the first incoming frame as its
+      // signal that the connection is real (vs. a port-up probe) before
+      // kicking off discovery.
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+
+      // 1) Plugin queries installed zone count (param 2148).
+      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
+        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
+      });
+      assert.equal(countReq.start_order, 1, `zone-count DATA-REQ should start_order=1; got ${JSON.stringify(countReq)}`);
+      alarm.send({
+        frame_type: 'DATA',
+        counter: countReq.counter,
+        account: String(fix.account),
+        id: 2148,
+        start_order: 1,
+        parameters: ['3'],
+        more: 'no',
+      });
+
+      // 2) Plugin queries zone names (param 260) — paginated, but 3 zones
+      //    fits in one page so we expect a single DATA-REQ for 1..3.
+      const namesReq = await alarm.waitForDataReq({ id: 260 });
+      assert.equal(namesReq.start_order, 1, `zone-names DATA-REQ should start at 1; got ${JSON.stringify(namesReq)}`);
+      alarm.send({
+        frame_type: 'DATA',
+        counter: namesReq.counter,
+        account: String(fix.account),
+        id: 260,
+        start_order: 1,
+        parameters: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
+        more: 'no',
+      });
+
+      // 3) Plugin should register each zone in-process — they appear in the
+      //    UI without a Homebridge restart.
+      await waitForAccessories(fix, ['Front Door', 'Living Room PIR', 'Kitchen Smoke']);
+
+      // 4) And persist them into config.json so a future restart still
+      //    sees them.
+      const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
+      const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
+      const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
+        | { zones?: Array<{ zone: number; name: string; type: string }> }
+        | undefined;
+      assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
+      const zones = myEntry!.zones ?? [];
+      const byZone = new Map(zones.map((z) => [z.zone, z]));
+      assert.equal(zones.length, 3, `expected 3 zones written to config.json; got ${zones.length}: ${JSON.stringify(zones)}`);
+      assert.equal(byZone.get(1)?.name, 'Front Door');
+      assert.equal(byZone.get(2)?.name, 'Living Room PIR');
+      assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
+      // Default type for newly-discovered zones is contact; user customizes
+      // afterwards via the UI.
+      for (const z of zones) {
+        assert.equal(z.type, 'contact', `zone ${z.zone} should default to contact; got ${z.type}`);
+      }
+    } finally {
+      alarm.close();
     }
   });
 });

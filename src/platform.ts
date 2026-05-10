@@ -94,11 +94,17 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       encoding: config.encoding ?? 'windows-1255',
     });
 
-    this.driver.on('connected', () => {
-      log.info('alarm panel connected');
+    this.driver.on('connected', () => log.info('alarm panel connected'));
+    this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
+    // Trigger zone discovery on the first frame we receive from the panel,
+    // not on raw TCP `connected`. Real panels start emitting `null`
+    // heartbeats immediately; transient probes (a port check that connects
+    // and immediately destroys the socket) never send a frame and so won't
+    // race the discovery against a closing socket.
+    this.driver.on('frameIn', () => {
+      if (this.autoDiscoveryAttempted) return;
       void this.maybeDiscoverNewZones();
     });
-    this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
 
     this.driver.on('arm', ({ partition, source }) => {
@@ -363,7 +369,15 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
       this.log.info(`zone discovery: appending ${newZones.length} new zone(s) to config.json: ${newZones.map((z) => `${z.zone} "${z.name}"`).join(', ')}`);
       await this.appendZonesToConfig(newZones);
-      this.log.info('zone discovery: config.json updated. Adjust the sensor type for each new zone in the plugin settings; Homebridge will reload the config and expose them as HomeKit accessories.');
+      // Also register the accessories in-process so they appear in HomeKit
+      // immediately. homebridge-config-ui-x reflects the config.json change
+      // in its form but does NOT trigger a Homebridge restart on its own —
+      // without this in-process registration, the accessories wouldn't show
+      // up until the user manually restarted Homebridge.
+      for (const z of newZones) {
+        this.registerZone(z);
+      }
+      this.log.info(`zone discovery: ${newZones.length} new HomeKit sensor(s) registered (default type "${DEFAULT_ZONE_TYPE}"). Edit each zone's type in the plugin settings; type changes take effect on the next Homebridge restart.`);
     } catch (err) {
       this.log.warn(`zone discovery skipped: ${(err as Error).message}`);
     }

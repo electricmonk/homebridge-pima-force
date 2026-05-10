@@ -20,9 +20,23 @@ Manual install:
 
 1. Install Homebridge: `sudo npm install -g homebridge --unsafe-perm`
 2. Install this plugin: `sudo npm install -g homebridge-pima-force`
-3. Add the platform block to your Homebridge `config.json` (see below).
+3. Configure the panel side (next section) so it dials in to your Homebridge host.
+4. Add a platform block to your Homebridge `config.json` listing **only your partitions and their user codes** (see "First-run / zone discovery" below). Do not enumerate zones manually — the plugin will populate them on first connect.
+5. Restart Homebridge. After the panel dials in, the plugin auto-discovers every zone, writes them into `config.json`, and registers each as a HomeKit sensor on the spot — they appear in the Home app immediately.
 
 \* Install from git: `sudo npm install -g git+https://github.com/electricmonk/homebridge-pima-force.git`
+
+## First-run / zone discovery
+
+The intended setup flow is **partition-only configuration**: you list the partitions and the user code authorized to arm/disarm each, and the plugin handles zones automatically.
+
+1. Configure the panel-side CMS path (next section) — this is what makes the panel dial in to the plugin's TCP listener.
+2. Add the platform block to `config.json` with `account`, `port`, and one entry per partition (`id`, `name`, `userCode`). Skip `zones`. (See "Basic config" below.)
+3. Start Homebridge. When the panel connects, the plugin queries it for the installed zone count and zone names, then **appends** each new zone to `config.json` as `{ "zone": N, "name": "<from panel>", "type": "contact" }` and **registers each as a HomeKit sensor in-process** — so they appear in the Home app immediately, without needing a Homebridge restart.
+4. In the plugin settings UI (or directly in `config.json`), adjust each zone's `type` to one of `contact` / `motion` / `leak` / `smoke`. **Type changes take effect on the next Homebridge restart** — Homebridge doesn't reload the plugin's in-memory config when `config.json` changes. Zone names already came from the panel — usually no need to rename.
+5. Auto-discovery is **append-only**. Names you've changed are never overwritten, types you've set are never reverted, and zones the panel temporarily stops reporting are not removed (a sensor going offline shouldn't drop the HomeKit accessory). Adding a new sensor to the panel later re-triggers discovery on the next plugin restart, and the new zone is appended + registered.
+
+If your panel returns Hebrew names that arrive garbled in HomeKit (`?` characters), set `encoding` (default `windows-1255`) to whatever code page your panel uses — see the parameters table below.
 
 ## Panel-side setup (important — the panel dials out to this plugin)
 
@@ -42,7 +56,9 @@ The panel can have up to three CMS paths active at once, so you can run this plu
 
 ## Config file
 
-#### Basic config
+#### Basic config (what you write yourself)
+
+The minimum the plugin needs to start. After the panel dials in, the `zones` array is auto-populated.
 
 ```json
 "platforms": [
@@ -55,18 +71,16 @@ The panel can have up to three CMS paths active at once, so you can run this plu
       {
         "id": 1,
         "name": "Main",
-        "userCode": "1234",
+        "userCode": "1234"
       }
-    ],
-    "zones": [
-      { "zone": 1, "name": "Front Door", "type": "contact" },
-      { "zone": 2, "name": "Living Room PIR", "type": "motion" }
-    ]    
+    ]
   }
 ]
 ```
 
-#### Advanced config (all features)
+#### After auto-discovery (what `config.json` looks like once the panel has connected)
+
+The plugin appended a `zones` block. You can adjust each zone's `type` here (or in the Homebridge UI); the plugin will not overwrite your changes.
 
 ```json
 "platforms": [
@@ -75,6 +89,35 @@ The panel can have up to three CMS paths active at once, so you can run this plu
     "name": "Pima FORCE",
     "port": 7780,
     "account": 1234,
+    "partitions": [
+      {
+        "id": 1,
+        "name": "Main",
+        "userCode": "1234"
+      }
+    ],
+    "zones": [
+      { "zone": 1, "name": "Front Door",        "type": "contact" },
+      { "zone": 2, "name": "Living Room PIR",   "type": "motion"  },
+      { "zone": 3, "name": "Kitchen Smoke",     "type": "smoke"   },
+      { "zone": 4, "name": "Bathroom Leak",     "type": "leak"    }
+    ]
+  }
+]
+```
+
+#### Advanced config (all features)
+
+Multiple partitions with per-partition `armModes`, an explicit siren block, and `debug` enabled. Zones are still auto-discovered — you only customize `type` after the fact.
+
+```json
+"platforms": [
+  {
+    "platform": "PimaForce",
+    "name": "Pima FORCE",
+    "port": 7780,
+    "account": 1234,
+    "encoding": "windows-1255",
     "debug": false,
     "siren": {
       "enabled": true,
@@ -85,11 +128,7 @@ The panel can have up to three CMS paths active at once, so you can run this plu
         "id": 1,
         "name": "Main",
         "userCode": "1234",
-        "armModes": {
-          "away": true,
-          "stay": true,
-          "night": false
-        }
+        "armModes": { "away": true, "stay": true,  "night": false }
       },
       {
         "id": 2,
@@ -97,13 +136,7 @@ The panel can have up to three CMS paths active at once, so you can run this plu
         "userCode": "5678",
         "armModes": { "away": true, "stay": false, "night": false }
       }
-    ],
-    "zones": [
-      { "zone": 1, "name": "Front Door", "type": "contact" },
-      { "zone": 2, "name": "Kitchen Smoke", "type": "smoke" },
-      { "zone": 3, "name": "Bathroom Leak", "type": "leak" },
-      { "zone": 4, "name": "Living Room PIR", "type": "motion" }
-    ]    
+    ]
   }
 ]
 ```
@@ -112,15 +145,16 @@ The panel can have up to three CMS paths active at once, so you can run this plu
 
 ### Platform-wide settings
 
-| Parameter   | Description                                                                                                              | Required | Default       | Type    |
-|-------------|--------------------------------------------------------------------------------------------------------------------------|----------|---------------|---------|
-| `name`      | How the plugin appears in Homebridge logs.                                                                              | No       | `Pima FORCE`  | String  |
-| `port`      | TCP port the panel dials in to. Must match the CMS path port on the panel.                                              | Yes      | `7780`        | Integer |
-| `account`   | Account ID configured on the panel's CMS path.                                                                          | Yes      | `1234`        | Integer |
-| `debug`     | When on, every JSON frame received from / sent to the panel is logged at info level (passwords are redacted). Noisy.   | No       | `false`       | Boolean |
-| `siren`     | External-siren accessory config — see "Siren settings" below.                                                            | No       | enabled       | Object  |
-| `partitions`| One entry per panel partition you want to expose.                                                                       | Yes      | —             | Array   |
-| `zones`     | Zones exposed as HomeKit sensors.                                                                                       | Yes       | `[]`                   | Array   |
+| Parameter   | Description                                                                                                              | Required | Default          | Type    |
+|-------------|--------------------------------------------------------------------------------------------------------------------------|----------|------------------|---------|
+| `name`      | How the plugin appears in Homebridge logs.                                                                              | No       | `Pima FORCE`     | String  |
+| `port`      | TCP port the panel dials in to. Must match the CMS path port on the panel.                                              | Yes      | `7780`           | Integer |
+| `account`   | Account ID configured on the panel's CMS path.                                                                          | Yes      | `1234`           | Integer |
+| `encoding`  | Character encoding for zone/user names returned by the panel. Set to `utf-8` for English-only installs; any encoding `TextDecoder` accepts is valid (`windows-1255`, `iso-8859-1`, etc.). If names appear as `?` in HomeKit the encoding is wrong. | No       | `windows-1255`   | String  |
+| `debug`     | When on, every JSON frame received from / sent to the panel is logged at info level (passwords are redacted). Noisy.   | No       | `false`          | Boolean |
+| `siren`     | External-siren accessory config — see "Siren settings" below.                                                            | No       | enabled          | Object  |
+| `partitions`| One entry per panel partition you want to expose.                                                                       | Yes      | —                | Array   |
+| `zones`     | Zones exposed as HomeKit sensors. **Auto-populated** by the plugin on first panel connect; appended to as new zones appear on the panel. You may edit each entry's `type` (and `name`, if you want to override the panel's name). Never delete entries unless the panel slot is genuinely gone.                                                                                       | No       | auto-populated   | Array   |
 
 
 ### Siren settings
