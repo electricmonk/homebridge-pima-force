@@ -99,12 +99,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump patch, commit, tag
+      - name: Bump patch, prepare notes, commit, tag
         id: bump
         run: |
           # --no-git-tag-version: don't auto-commit/tag; we do it ourselves
           # so we can include [skip ci] and push commit + tag in one shot.
+          # The `version` script in package.json runs conventional-changelog,
+          # which prepends a new section to CHANGELOG.md.
           npm version patch --no-git-tag-version
+
+          # Extract + validate release notes BEFORE any side effects (commit,
+          # tag, push, npm publish). A malformed CHANGELOG aborts the release
+          # cleanly with no remote state changed.
+          awk '/^## \[/{n++; if(n>1) exit} /^# Changelog/{exit} {print}' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ] || ! head -n 1 /tmp/notes.md | grep -q '^## \['; then
+            echo "::error::release notes are empty or don't start with '## [' — aborting before any push"
+            head -n 5 /tmp/notes.md || true
+            exit 1
+          fi
+
           git add package.json package-lock.json CHANGELOG.md
           new_version=$(node -p "require('./package.json').version")
           tag="v$new_version"
@@ -120,16 +133,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Topmost CHANGELOG.md section = notes for this release. Stop at
-          # the next "## [" header or the legacy "# Changelog" banner.
-          awk '/^## \[/{n++; if(n>1) exit} /^# Changelog/{exit} {print}' CHANGELOG.md > /tmp/notes.md
-          # Sanity-check: bail before creating the release if extraction
-          # produced something that isn't a CHANGELOG section header.
-          if [ ! -s /tmp/notes.md ] || ! head -n 1 /tmp/notes.md | grep -q '^## \['; then
-            echo "::error::release notes are empty or don't start with '## [' — refusing to create release"
-            head -n 5 /tmp/notes.md || true
-            exit 1
-          fi
+          # /tmp/notes.md was extracted and validated in the bump step.
           gh release create "${{ steps.bump.outputs.tag }}" \
             --title "${{ steps.bump.outputs.tag }}" \
             --notes-file /tmp/notes.md
