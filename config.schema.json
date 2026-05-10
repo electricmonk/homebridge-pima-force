@@ -25,6 +25,12 @@
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
+      "encoding": {
+        "title": "Panel Text Encoding",
+        "type": "string",
+        "default": "windows-1255",
+        "description": "Character encoding the panel uses for zone and user names. Default `windows-1255` is correct for Israeli FORCE panels with Hebrew names. Switch to `utf-8` for English-only installations or non-Hebrew panel localizations. Anything the standard `TextDecoder` accepts is valid (`utf-8`, `windows-1255`, `iso-8859-1`, `iso-8859-2`, etc.). If your zone names appear as `?` or replacement characters in HomeKit, the encoding is wrong."
+      },
       "debug": {
         "title": "Debug Logging",
         "type": "boolean",

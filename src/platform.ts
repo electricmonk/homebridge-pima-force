@@ -47,6 +47,8 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   /** Top-level zones (current schema). */
   zones?: ZoneConfig[];
   siren?: SirenConfig;
+  /** Panel text encoding for non-ASCII names. Default 'windows-1255' (Israeli FORCE). */
+  encoding?: string;
   /** When true, log every frame in/out at info level (passwords redacted). */
   debug?: boolean;
 }
@@ -89,6 +91,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       port: config.port ?? 7780,
       account: config.account ?? 1234,
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
+      encoding: config.encoding ?? 'windows-1255',
     });
 
     this.driver.on('connected', () => {
