@@ -72,6 +72,8 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   private readonly seenUnknownPartitions = new Set<number>();
   private readonly seenUnknownZones = new Set<number>();
   private readonly seenUnknownOutputs = new Set<number>();
+  /** Auto-discovery runs at most once per process — successful or not. */
+  private autoDiscoveryAttempted = false;
 
   constructor(
     public readonly log: Logger,
@@ -329,7 +331,9 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
    * when there's an actual delta to persist.
    */
   private async maybeDiscoverNewZones(): Promise<void> {
+    if (this.autoDiscoveryAttempted) return;
     if (!this.config.partitions || this.config.partitions.length === 0) return;
+    this.autoDiscoveryAttempted = true;
     try {
       const count = await this.queryZoneCount();
       if (!count) return;

@@ -56,12 +56,12 @@ The panel can have up to three CMS paths active at once, so you can run this plu
         "id": 1,
         "name": "Main",
         "userCode": "1234",
-        "zones": [
-          { "zone": 1, "name": "Front Door", "type": "contact" },
-          { "zone": 2, "name": "Living Room PIR", "type": "motion" }
-        ]
       }
-    ]
+    ],
+    "zones": [
+      { "zone": 1, "name": "Front Door", "type": "contact" },
+      { "zone": 2, "name": "Living Room PIR", "type": "motion" }
+    ]    
   }
 ]
 ```
@@ -89,24 +89,21 @@ The panel can have up to three CMS paths active at once, so you can run this plu
           "away": true,
           "stay": true,
           "night": false
-        },
-        "zones": [
-          { "zone": 1, "name": "Front Door", "type": "contact" },
-          { "zone": 2, "name": "Kitchen Smoke", "type": "smoke" },
-          { "zone": 3, "name": "Bathroom Leak", "type": "leak" },
-          { "zone": 4, "name": "Living Room PIR", "type": "motion" }
-        ]
+        }
       },
       {
         "id": 2,
         "name": "Garage",
         "userCode": "5678",
-        "armModes": { "away": true, "stay": false, "night": false },
-        "zones": [
-          { "zone": 16, "name": "Garage Door", "type": "contact" }
-        ]
+        "armModes": { "away": true, "stay": false, "night": false }
       }
-    ]
+    ],
+    "zones": [
+      { "zone": 1, "name": "Front Door", "type": "contact" },
+      { "zone": 2, "name": "Kitchen Smoke", "type": "smoke" },
+      { "zone": 3, "name": "Bathroom Leak", "type": "leak" },
+      { "zone": 4, "name": "Living Room PIR", "type": "motion" }
+    ]    
   }
 ]
 ```
@@ -123,6 +120,8 @@ The panel can have up to three CMS paths active at once, so you can run this plu
 | `debug`     | When on, every JSON frame received from / sent to the panel is logged at info level (passwords are redacted). Noisy.   | No       | `false`       | Boolean |
 | `siren`     | External-siren accessory config — see "Siren settings" below.                                                            | No       | enabled       | Object  |
 | `partitions`| One entry per panel partition you want to expose.                                                                       | Yes      | —             | Array   |
+| `zones`     | Zones exposed as HomeKit sensors.                                                                                       | Yes       | `[]`                   | Array   |
+
 
 ### Siren settings
 
@@ -139,7 +138,6 @@ The panel can have up to three CMS paths active at once, so you can run this plu
 | `partition.name`     | Display name in HomeKit.                                                                                                                           | Yes      | —                      | String  |
 | `partition.userCode` | User code for arming / disarming this partition. Stored in plain text in `config.json` — protect access to the host accordingly.                  | Yes      | —                      | String  |
 | `partition.armModes` | Per-partition checkboxes for which HomeKit armed modes to expose. DISARM is always available — see "Arm-mode mapping" below.                      | No       | all enabled            | Object  |
-| `partition.zones`    | Zones in this partition exposed as HomeKit sensors.                                                                                                | No       | `[]`                   | Array   |
 
 ### Arm-mode mapping
 

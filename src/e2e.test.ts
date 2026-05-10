@@ -113,7 +113,30 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
   const bridgePort = await getFreePort();
   const alarmPort = await getFreePort();
   const account = 1234;
+  const reusingStorage = !!opts.storage;
   const storage = opts.storage ?? mkdtempSync(join(tmpdir(), 'hbpima-e2e-'));
+
+  // When reusing storage, read the bridge block from the existing config.json
+  // so the HAP cache (keyed by bridge username) lines up across boots. We
+  // only refresh the listener ports, which the HAP cache doesn't bind to.
+  let bridgeBlock: Record<string, unknown>;
+  if (reusingStorage) {
+    const existing = JSON.parse(readFileSync(join(storage, 'config.json'), 'utf8')) as {
+      bridge: Record<string, unknown>;
+    };
+    bridgeBlock = { ...existing.bridge, port: bridgePort };
+  } else {
+    bridgeBlock = {
+      name: 'E2E Test Bridge',
+      // Random username to avoid HAP cache collisions across runs.
+      username: ['CC', '22', '3D', 'E3'].concat([
+        Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
+        Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
+      ]).join(':'),
+      port: bridgePort,
+      pin: '031-45-154',
+    };
+  }
 
   const defaultPima = {
     platform: 'PimaForce',
@@ -150,16 +173,7 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
     : defaultPima;
 
   const config = {
-    bridge: {
-      name: 'E2E Test Bridge',
-      // Random username to avoid HAP cache collisions across runs.
-      username: ['CC', '22', '3D', 'E3'].concat([
-        Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
-        Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase(),
-      ]).join(':'),
-      port: bridgePort,
-      pin: '031-45-154',
-    },
+    bridge: bridgeBlock,
     platforms: [
       {
         platform: 'config',
@@ -208,7 +222,9 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
       ]);
       if (!settled) child.kill('SIGKILL');
     }
-    rmSync(storage, { recursive: true, force: true });
+    if (!opts.keepStorage) {
+      rmSync(storage, { recursive: true, force: true });
+    }
   };
 
   try {
@@ -246,7 +262,16 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
       // The driver may emit multiple frames per chunk under TCP coalescing.
       const text = buf.toString('utf8');
       for (const part of text.split(/(?<=\})(?=\{)/)) {
-        try { received.push(JSON.parse(part)); } catch { /* ignore */ }
+        try {
+          const frame = JSON.parse(part);
+          // The plugin emits a DATA-REQ on every connect to auto-discover
+          // new zones from the panel. Real panels respond with a DATA frame;
+          // these tests don't simulate that path. Drop DATA-REQ from
+          // `received` so frame-count assertions like `waitForRx(N)` aren't
+          // tripped by it. The plugin will silently time out and move on.
+          if (frame?.frame_type === 'DATA-REQ') continue;
+          received.push(frame);
+        } catch { /* ignore */ }
       }
     });
     sock.once('connect', () => {
@@ -1022,6 +1047,96 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       assert.equal(op.partition, 2);
     } finally {
       alarm.close();
+    }
+  });
+});
+
+/**
+ * Migration E2E: a user upgrading from a pre-flat-zones plugin version had
+ * their config laid out with zones nested under each partition. The new
+ * plugin must (a) read that shape, (b) register accessories with stable
+ * UUIDs derived from zone#/partition.id only (not from nesting), and
+ * (c) preserve those accessories across a restart so existing HomeKit
+ * automations don't break.
+ */
+describe('E2E: legacy nested config migration', { timeout: 90_000 }, () => {
+  const legacyPima = {
+    name: 'Pima E2E (legacy)',
+    siren: { enabled: true, name: 'Legacy Siren' },
+    partitions: [
+      {
+        id: 1,
+        name: 'Legacy Partition',
+        userCode: '0000',
+        zones: [
+          { zone: 7, name: 'Legacy Door', type: 'contact' },
+        ],
+      },
+    ],
+  };
+
+  let fix: E2EFixture;
+  let storagePath: string;
+  let firstBootUuids: Map<string, string>;
+
+  before(async () => {
+    // Boot 1: install with legacy nested config. Plugin migrates in-memory
+    // and registers accessories with the new flat-shape UUID convention.
+    fix = await setupE2E({ pimaPlatformOverride: legacyPima, keepStorage: true });
+    storagePath = fix.storage;
+    await waitForAccessories(fix, ['Legacy Partition', 'Legacy Door', 'Legacy Siren']);
+    const list = await listAccessories(fix);
+    firstBootUuids = new Map(list.map((a) => [a.serviceName, a.uniqueId]));
+    await fix.stop();
+  });
+
+  after(async () => {
+    rmSync(storagePath, { recursive: true, force: true });
+  });
+
+  it('migrates nested zones into accessories on first boot', async () => {
+    assert.ok(firstBootUuids.has('Legacy Partition'), 'partition accessory was not registered');
+    assert.ok(firstBootUuids.has('Legacy Door'), 'nested zone was not migrated to a HomeKit accessory');
+    assert.ok(firstBootUuids.has('Legacy Siren'), 'siren accessory was not registered');
+  });
+
+  it('logs the migration at INFO with the count of hoisted zones', async () => {
+    const log = readFileSync(join(storagePath, 'homebridge.log'), 'utf8');
+    assert.match(
+      log,
+      /migrated 1 zone\(s\) from legacy nested partition\.zones/,
+      `expected migration log line; got log:\n${log}`,
+    );
+  });
+
+  it('preserves accessory uniqueIds across a restart with the same legacy config', async () => {
+    // Boot 2: same storage, same legacy config. Cached accessories from
+    // Boot 1 should be matched by UUID — no new registrations, no orphans.
+    fix = await setupE2E({
+      storage: storagePath,
+      pimaPlatformOverride: legacyPima,
+      keepStorage: true,
+    });
+    try {
+      await waitForAccessories(fix, ['Legacy Partition', 'Legacy Door', 'Legacy Siren']);
+      const list = await listAccessories(fix);
+      const second = new Map(list.map((a) => [a.serviceName, a.uniqueId]));
+
+      for (const name of ['Legacy Partition', 'Legacy Door', 'Legacy Siren']) {
+        const before = firstBootUuids.get(name);
+        const after = second.get(name);
+        assert.ok(after, `"${name}" missing after restart`);
+        assert.equal(after, before, `"${name}" uniqueId changed across restart (was ${before}, now ${after})`);
+      }
+
+      const log = readFileSync(join(storagePath, 'homebridge.log'), 'utf8');
+      assert.doesNotMatch(
+        log,
+        /removing \d+ stale accessory/,
+        `cached accessories were unexpectedly orphaned during restart; log:\n${log}`,
+      );
+    } finally {
+      await fix.stop();
     }
   });
 });
