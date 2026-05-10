@@ -71,6 +71,32 @@ describe('parseFrames', () => {
     assert.deepEqual(parseFrames(Buffer.alloc(0)), []);
     assert.deepEqual(parseFrames(Buffer.alloc(250, 0)), []);
   });
+
+  it('decodes Hebrew zone names when encoding=windows-1255', () => {
+    // Build a fake DATA frame with Hebrew zone names encoded in Windows-1255.
+    // 'דלת ראשית' = Front Door in Hebrew. Windows-1255 byte values:
+    //   ד=0xE3, ל=0xEC, ת=0xFA, ' '=0x20, ר=0xF8, א=0xE0, ש=0xF9, י=0xE9, ת=0xFA
+    const json = '{"frame_type":"DATA","counter":1,"id":260,"start_order":1,"parameters":["__HEBREW__"]}';
+    const before = Buffer.from(json.replace('__HEBREW__', '\x00'), 'ascii');
+    // Splice in the Windows-1255 bytes where the placeholder was.
+    const hebrewBytes = Buffer.from([0xE3, 0xEC, 0xFA, 0x20, 0xF8, 0xE0, 0xF9, 0xE9, 0xFA]);
+    const placeholderIdx = before.indexOf(0x00);
+    const buf = Buffer.concat([
+      before.subarray(0, placeholderIdx),
+      hebrewBytes,
+      before.subarray(placeholderIdx + 1),
+    ]);
+
+    // UTF-8 decode mangles the Hebrew bytes (each becomes U+FFFD '�').
+    const utf8 = parseFrames(buf);
+    assert.equal(utf8.length, 1);
+    assert.notEqual((utf8[0]!.parameters as string[])[0], 'דלת ראשית');
+
+    // Windows-1255 decode preserves the Hebrew text.
+    const w1255 = parseFrames(buf, 'windows-1255');
+    assert.equal(w1255.length, 1);
+    assert.equal((w1255[0]!.parameters as string[])[0], 'דלת ראשית');
+  });
 });
 
 describe('shouldAck', () => {

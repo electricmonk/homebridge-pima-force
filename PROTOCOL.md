@@ -78,6 +78,8 @@ Optypes (Appendix B):
 - Omit `stop_order` → AS returns from `start_order` to end of array.
 - AS may split: response carries `"more":"yes"` → re-request from `last_order+1` until `more` is missing or `"no"`.
 - HA→AS DATA payloads ≤ 250 bytes.
+- **Responses are privilege-filtered by `password`.** A per-partition user code only returns rows for its own partition; rows for other partitions are silently omitted. A master/global user code returns everything. The installer code is **rejected** for CMS DATA-REQ (`NAK "קוד שגוי"` / "wrong code") — it authenticates only at the keypad. Practical implication: query 2149/2310/etc. with the broadest available user code, or query with each partition code in turn and compare visibilities to deduce zone-partition membership.
+- Adjacent IDs **261, 263, 264, 265** exist (the panel responds rather than `NAK "Parameter Not Exist"`) but reject every CMS-presentable code (user + master + installer) with `NAK "wrong code"`. They are presumed installer-config parameters and are not reachable from the JSON CMS surface. ID **262** is reachable with a user code and returns one byte per zone of unknown semantic — *not* partition.
 
 Parameters (Appendix C):
 
@@ -96,6 +98,16 @@ Parameters (Appendix C):
 ### System Key Status (id 2310)
 
 `1`=NotExist · `2`=Disarmed · `3`=FullArmed · `4`=Home1 · `5`=Home2 · `6`=Home3 · `7`=Home4 · `8`=Shabbat-ON · `9`=Shabbat-OFF.
+
+Privilege-filtered (see DATA-REQ rules above): partitions outside the user code's scope return as `1` (NotExist) — indistinguishable from genuinely-unconfigured partitions. To reliably enumerate partitions, query with the master/global user code.
+
+### Discovering zone-partition mapping
+
+The protocol has no documented "zones-on-partition X" parameter. Three combinable approaches:
+
+1. **Live `event type=760` frames** carry both `zone` and `partition` — every state change teaches the mapping. The driver already emits them.
+2. **2149 cross-referenced across user codes:** query 2149 with each per-partition user code and with the master code. A zone that appears for code A but not code B is on partition A's scope. Caveat — 2149 omits closed-and-clear zones, so this only catches zones with persistent non-zero state (typically 24h: smoke / flood / panic).
+3. **2310 with each partition code** confirms which partitions a code authorises (returns state for in-scope partitions, `1` for others).
 
 ### Zone Status bits (id 2149)
 
@@ -270,3 +282,4 @@ Empty `parameters: []` ⇒ no faults. `"more":"yes"` ⇒ paginate.
 - Hebrew names use Windows-1255, not UTF-8 — see `decodeBuffer` in `src/protocol.ts`.
 - Frame size 250 B applies to HA→AS DATA. EVENT/ACK/OPERATION are natural length but stay small in practice.
 - Field order in OPERATION/ACK matches the Chowmain C4 driver capture; some panels are picky if reordered.
+- **Don't send a follow-up frame immediately after an OPERATION** — observed in zone-discovery probing: an `OPERATION` (e.g. disarm) followed within milliseconds by a `DATA-REQ` reaches the panel as one TCP segment (Nagle's), and the panel responds with `NAK counter=0 "JSON frame"` and silently drops *both*. The OPERATION never takes effect. Pause ≥500 ms after sending an OPERATION, or wait for the corresponding CID 401/407 confirmation event before sending the next HA→AS frame. Consider `socket.setNoDelay(true)` if back-to-back commands are ever needed.

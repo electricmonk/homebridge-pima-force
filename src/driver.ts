@@ -126,9 +126,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * the panel rejects). Authorization uses the first configured partition's
    * user code, same as output operations.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number }): Promise<void> {
+  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<number> {
     const part = this.config.partitions[0];
-    if (!part) {
+    if (!part && !params.password) {
       return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
     }
     return new Promise((resolve, reject) => {
@@ -139,23 +139,23 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       const reqParams = {
         account: this.config.account,
         counter: this.opCounter++,
-        password: part.userCode,
+        password: params.password ?? part!.userCode,
         id: params.id,
         startOrder: params.startOrder,
         stopOrder: params.stopOrder,
       };
       this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve(reqParams.counter)));
     });
   }
 
   /** Convenience: request the panel's zone names (parameter id 260). */
-  getZoneNames(startOrder = 1, stopOrder?: number): Promise<void> {
+  getZoneNames(startOrder = 1, stopOrder?: number): Promise<number> {
     return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
   }
 
   /** Convenience: request the count of installed zones (parameter id 2148). */
-  getZoneCount(): Promise<void> {
+  getZoneCount(): Promise<number> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
   }
 
@@ -264,9 +264,15 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       // spec section 4.6.5; the consumer interprets them.
       const id = Number(frame.id ?? 0);
       const startOrder = Number(frame.start_order ?? 0);
-      const params = Array.isArray(frame.parameters)
+      let params = Array.isArray(frame.parameters)
         ? frame.parameters.map(String)
         : [];
+      if (this.config.reverseStrings) {
+        // Spread iterates by code point so non-BMP characters (e.g. emoji)
+        // wouldn't get split mid-surrogate; for Hebrew this is just code
+        // unit reversal anyway since it's BMP.
+        params = params.map((s) => [...s].reverse().join(''));
+      }
       const more = frame.more === 'yes';
       this.emit('data', { id, startOrder, parameters: params, more });
       return;

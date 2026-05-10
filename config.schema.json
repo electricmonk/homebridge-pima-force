@@ -25,6 +25,12 @@
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
+      "encoding": {
+        "title": "Panel Text Encoding",
+        "type": "string",
+        "default": "windows-1255",
+        "description": "Character encoding the panel uses for zone and user names. Default `windows-1255` is correct for Israeli FORCE panels with Hebrew names. Switch to `utf-8` for English-only installations or non-Hebrew panel localizations. Anything the standard `TextDecoder` accepts is valid (`utf-8`, `windows-1255`, `iso-8859-1`, `iso-8859-2`, etc.). If your zone names appear as `?` or replacement characters in HomeKit, the encoding is wrong."
+      },
       "debug": {
         "title": "Debug Logging",
         "type": "boolean",
@@ -97,39 +103,40 @@
                   "default": true
                 }
               }
+            }
+          }
+        }
+      },
+      "zones": {
+        "title": "Zones",
+        "type": "array",
+        "description": "Each zone on the panel exposed as a HomeKit sensor. The plugin auto-populates this list on first connect by querying zone names from the panel; you only need to set the sensor type. New zones added to the panel later are appended automatically.",
+        "items": {
+          "type": "object",
+          "required": ["zone", "name"],
+          "properties": {
+            "zone": {
+              "title": "Zone Number",
+              "type": "integer",
+              "minimum": 1,
+              "description": "Zone number on the panel."
             },
-            "zones": {
-              "title": "Zones",
-              "type": "array",
-              "items": {
-                "type": "object",
-                "required": ["zone", "name", "type"],
-                "properties": {
-                  "zone": {
-                    "title": "Zone Number",
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Zone number on the panel."
-                  },
-                  "name": {
-                    "title": "Display Name",
-                    "type": "string",
-                    "description": "Shown in HomeKit (e.g., 'Front Door', 'Living Room Motion')."
-                  },
-                  "type": {
-                    "title": "Sensor Type",
-                    "type": "string",
-                    "default": "contact",
-                    "oneOf": [
-                      { "title": "Contact (door/window)", "enum": ["contact"] },
-                      { "title": "Motion", "enum": ["motion"] },
-                      { "title": "Water Leak", "enum": ["leak"] },
-                      { "title": "Smoke", "enum": ["smoke"] }
-                    ],
-                    "description": "How this zone is exposed in HomeKit. The panel-side semantics are identical (active/restored); the type only affects the HomeKit icon and which automation primitives it offers."
-                  }
-                }
-              }
+            "name": {
+              "title": "Display Name",
+              "type": "string",
+              "description": "Shown in HomeKit (e.g., 'Front Door', 'Living Room Motion')."
+            },
+            "type": {
+              "title": "Sensor Type",
+              "type": "string",
+              "default": "contact",
+              "oneOf": [
+                { "title": "Contact (door/window)", "enum": ["contact"] },
+                { "title": "Motion", "enum": ["motion"] },
+                { "title": "Water Leak", "enum": ["leak"] },
+                { "title": "Smoke", "enum": ["smoke"] }
+              ],
+              "description": "How this zone is exposed in HomeKit. The panel-side semantics are identical (active/restored); the type only affects the HomeKit icon and which automation primitives it offers."
             }
           }
         }
