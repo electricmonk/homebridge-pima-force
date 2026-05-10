@@ -222,18 +222,19 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
    * clobbered by stale nested ones.
    */
   private resolveConfiguredZones(): { zones: ZoneConfig[]; migrated: number } {
-    const zones = [...(this.config.zones ?? [])];
-    const seen = new Set(zones.map((z) => z.zone));
+    const byZone = new Map<number, ZoneConfig>();
+    for (const z of this.config.zones ?? []) {
+      if (!byZone.has(z.zone)) byZone.set(z.zone, z);
+    }
     let migrated = 0;
     for (const p of this.config.partitions ?? []) {
       for (const z of p.zones ?? []) {
-        if (seen.has(z.zone)) continue;
-        zones.push({ zone: z.zone, name: z.name, type: z.type });
-        seen.add(z.zone);
+        if (byZone.has(z.zone)) continue;
+        byZone.set(z.zone, { zone: z.zone, name: z.name, type: z.type });
         migrated++;
       }
     }
-    return { zones, migrated };
+    return { zones: [...byZone.values()], migrated };
   }
 
   private discoverDevices(): void {
@@ -412,6 +413,9 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
    */
   private requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
     return new Promise((resolve, reject) => {
+      const allParams: string[] = [];
+      let nextStart = startOrder;
+
       const cleanup = (): void => {
         clearTimeout(timer);
         this.driver.off('data', dataHandler);
@@ -421,11 +425,20 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         cleanup();
         reject(new Error(`timeout waiting for DATA id=${id} start=${startOrder}`));
       }, ZONE_DISCOVERY_TIMEOUT_MS);
-      const dataHandler = (msg: { id: number; startOrder: number; parameters: string[] }): void => {
-        if (msg.id === id && msg.startOrder === startOrder) {
+      const dataHandler = (msg: { id: number; startOrder: number; parameters: string[]; more: boolean }): void => {
+        if (msg.id !== id || msg.startOrder !== nextStart) return;
+        allParams.push(...msg.parameters);
+        if (!msg.more) {
           cleanup();
-          resolve(msg.parameters);
+          resolve(allParams);
+          return;
         }
+        // Panel split the response; request the next fragment.
+        nextStart = startOrder + allParams.length;
+        this.driver.requestData({ id, startOrder: nextStart, stopOrder }).catch((err) => {
+          cleanup();
+          reject(err);
+        });
       };
       const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
         cleanup();
@@ -457,7 +470,10 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       return;
     }
     const existing = Array.isArray(myEntry.zones) ? (myEntry.zones as ZoneConfig[]) : [];
-    myEntry.zones = [...existing, ...newZones];
+    const existingNums = new Set(existing.map((z: ZoneConfig) => z.zone));
+    const toAppend = newZones.filter((z) => !existingNums.has(z.zone));
+    if (toAppend.length === 0) return;
+    myEntry.zones = [...existing, ...toAppend];
 
     const tmp = `${path}.pima-force.tmp.${process.pid}`;
     await fsp.writeFile(tmp, JSON.stringify(json, null, 4));

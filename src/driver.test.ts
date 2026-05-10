@@ -260,6 +260,63 @@ describe('PimaDriver — send side (arm/disarm)', () => {
       stop_order: 1,
     });
   });
+
+  it('requestData uses params.password instead of partition userCode when both are present', async () => {
+    await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16, password: '9999' });
+    await waitForRx(h!, 1);
+    assert.equal(h!.rxFromDriver[0].password, '9999');
+    assert.equal(h!.rxFromDriver[0].id, 260);
+  });
+});
+
+describe('PimaDriver — requestData password override', () => {
+  it('requestData succeeds with params.password when no partitions configured', async () => {
+    const driver = new PimaDriver({
+      port: 0,
+      account: 5678,
+      partitions: [],
+      opCounterStart: 1,
+    });
+    await driver.start();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const addr = ((driver as any).server as net.Server).address() as net.AddressInfo;
+    const connected = once(driver, 'connected');
+    const rxFromDriver: Array<Record<string, unknown>> = [];
+    const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
+    sock.on('data', (buf) => {
+      const text = buf.toString('utf8');
+      for (const part of text.split(/(?<=\})(?=\{)/)) {
+        try { rxFromDriver.push(JSON.parse(part)); } catch { /* ignore */ }
+      }
+    });
+    await connected;
+
+    await driver.requestData({ id: 260, startOrder: 1, password: 'override' });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 1000;
+      const poll = (): void => {
+        if (rxFromDriver.length >= 1) return resolve();
+        if (Date.now() > deadline) return reject(new Error('timeout waiting for DATA-REQ'));
+        setTimeout(poll, 5);
+      };
+      poll();
+    });
+    assert.equal(rxFromDriver[0].password, 'override');
+    assert.equal(rxFromDriver[0].id, 260);
+
+    sock.destroy();
+    await driver.stop();
+  });
+
+  it('requestData rejects when no partitions and no password', async () => {
+    const driver = new PimaDriver({ port: 0, account: 5678, partitions: [] });
+    await driver.start();
+    await assert.rejects(
+      driver.requestData({ id: 260, startOrder: 1 }),
+      /no partition configured to derive a user code for DATA-REQ/,
+    );
+    await driver.stop();
+  });
 });
 
 describe('PimaDriver — send without connection', () => {

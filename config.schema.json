@@ -110,10 +110,10 @@
       "zones": {
         "title": "Zones",
         "type": "array",
-        "required": ["zone", "name", "type"],
         "description": "Each zone on the panel exposed as a HomeKit sensor. The plugin auto-populates this list on first connect by querying zone names from the panel; you only need to set the sensor type. New zones added to the panel later are appended automatically.",
         "items": {
           "type": "object",
+          "required": ["zone", "name"],
           "properties": {
             "zone": {
               "title": "Zone Number",
