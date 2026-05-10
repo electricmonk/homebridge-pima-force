@@ -5,25 +5,23 @@
   "headerDisplay": "Homebridge plugin for the Pima FORCE alarm panel.\n\nThe alarm panel dials *out* to this plugin: configure a CMS path on the panel (Installer Code → System Configuration → CMS & Communication → Monitoring Station → CMS2/3 → Comm.Paths → Network) pointing to this Homebridge host on the port below, with Protocol set to JSON and Account ID matching the value here.",
   "schema": {
     "type": "object",
+    "required": ["name", "port", "account", "partitions"],
     "properties": {
       "name": {
         "title": "Plugin Name",
         "type": "string",
-        "required": true,
         "default": "Pima FORCE",
         "description": "How the plugin appears in the Homebridge log."
       },
       "port": {
         "title": "TCP Port",
         "type": "integer",
-        "required": true,
         "default": 7780,
         "description": "Port the alarm panel will dial in to. Must match the CMS path port configured on the panel."
       },
       "account": {
         "title": "Account ID",
         "type": "integer",
-        "required": true,
         "default": 1234,
         "description": "Account ID configured on the panel's CMS path. Distinct from any other CMS (e.g., Control4)."
       },
@@ -58,24 +56,22 @@
         "minItems": 1,
         "items": {
           "type": "object",
+          "required": ["id", "name", "userCode"],
           "properties": {
             "id": {
               "title": "Partition Number",
               "type": "integer",
-              "required": true,
               "minimum": 1,
               "description": "Partition number on the panel (1-16)."
             },
             "name": {
               "title": "Display Name",
               "type": "string",
-              "required": true,
               "description": "Shown in HomeKit (e.g., 'Main', 'Garage')."
             },
             "userCode": {
               "title": "User Code",
               "type": "string",
-              "required": true,
               "format": "password",
               "description": "User code for arming/disarming this partition. Stored in plain text in Homebridge config — protect access to the host accordingly.",
               "pattern": "^[0-9]{4,8}$"
@@ -108,6 +104,7 @@
       "zones": {
         "title": "Zones",
         "type": "array",
+        "required": ["zone", "name", "type"],
         "description": "Each zone on the panel exposed as a HomeKit sensor. The plugin auto-populates this list on first connect by querying zone names from the panel; you only need to set the sensor type. New zones added to the panel later are appended automatically.",
         "items": {
           "type": "object",
@@ -115,20 +112,17 @@
             "zone": {
               "title": "Zone Number",
               "type": "integer",
-              "required": true,
               "minimum": 1,
               "description": "Zone number on the panel."
             },
             "name": {
               "title": "Display Name",
               "type": "string",
-              "required": true,
               "description": "Shown in HomeKit (e.g., 'Front Door', 'Living Room Motion')."
             },
             "type": {
               "title": "Sensor Type",
               "type": "string",
-              "required": true,
               "default": "contact",
               "oneOf": [
                 { "title": "Contact (door/window)", "enum": ["contact"] },
