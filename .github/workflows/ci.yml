@@ -1,11 +1,16 @@
 name: CI
 
 # CI runs on every push and PR. The release job runs only on pushes to master:
-# it patch-bumps the version, commits + tags back to master with [skip ci].
+# it patch-bumps the version, commits + tags back to master with [skip ci],
+# publishes to npm with provenance, and creates a GitHub Release.
+#
+# Publish lives in this job (not a separate tag-triggered workflow) because
+# tags pushed by the default GITHUB_TOKEN do not trigger `on: push: tags`
+# workflows.
 #
 # No NPM_TOKEN secret is required — the GitHub OIDC token is exchanged for
 # an npm publish token automatically when `npm publish --provenance` runs
-# in a workflow that has `id-token: write` permission.
+# in a job that has `id-token: write` permission (Trusted Publisher).
 
 on:
   push:
@@ -60,7 +65,7 @@ jobs:
                 - 'tsconfig.json'
                 - 'config.schema.json'
   release:
-    name: Bump and tag
+    name: Release
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/master' &&
@@ -68,8 +73,10 @@ jobs:
     needs: [test, check-changes]
     runs-on: ubuntu-latest
     permissions:
-      # Push the version bump + tag back to master, and create a GitHub Release.
+      # contents: write — push the version bump + tag, create the GH Release.
+      # id-token: write — npm Trusted Publisher OIDC token exchange + provenance.
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,6 +123,19 @@ jobs:
           # Topmost CHANGELOG.md section = notes for this release. Stop at
           # the next "## [" header or the legacy "# Changelog" banner.
           awk '/^## \[/{n++; if(n>1) exit} /^# Changelog/{exit} {print}' CHANGELOG.md > /tmp/notes.md
+          # Sanity-check: bail before creating the release if extraction
+          # produced something that isn't a CHANGELOG section header.
+          if [ ! -s /tmp/notes.md ] || ! head -n 1 /tmp/notes.md | grep -q '^## \['; then
+            echo "::error::release notes are empty or don't start with '## [' — refusing to create release"
+            head -n 5 /tmp/notes.md || true
+            exit 1
+          fi
           gh release create "${{ steps.bump.outputs.tag }}" \
             --title "${{ steps.bump.outputs.tag }}" \
             --notes-file /tmp/notes.md
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm with provenance (OIDC)
+        run: npm publish --provenance --access public            
