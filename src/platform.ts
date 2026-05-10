@@ -91,7 +91,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       port: config.port ?? 7780,
       account: config.account ?? 1234,
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
-      encoding: config.encoding ?? 'windows-1255',
+      encoding: (config.encoding?.trim() || undefined) ?? 'windows-1255',
     });
 
     this.driver.on('connected', () => log.info('alarm panel connected'));
@@ -386,6 +386,8 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       this.log.info(`zone discovery: ${newZones.length} new HomeKit sensor(s) registered (default type "${DEFAULT_ZONE_TYPE}"). Edit each zone's type in the plugin settings; type changes take effect on the next Homebridge restart.`);
     } catch (err) {
       this.log.warn(`zone discovery skipped: ${(err as Error).message}`);
+      // Transient failure (timeout, NAK) — reset so the next frameIn can retry.
+      this.autoDiscoveryAttempted = false;
     }
   }
 
