@@ -372,8 +372,12 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
   it('on panel connect, queries partition state via DATA-REQ and reflects arm status', async () => {
     const alarm = await fix.connectAlarm();
     try {
-      // The platform sends a DATA-REQ (id=2310) for each partition immediately
-      // on connect (before any alarm-originated frames arrive).
+      // The driver verifies the panel on first received frame. Send a heartbeat
+      // so verification completes and queryPartitionStates() fires.
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      await alarm.waitForRx(1); // wait for the ACK
+
+      // The platform should now send DATA-REQ (id=2310) for each configured partition.
       const deadline = Date.now() + 5000;
       let req: Record<string, unknown> | undefined;
       while (Date.now() < deadline) {

@@ -77,14 +77,21 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       log.warn('No partitions configured; plugin will register no accessories. Open the plugin settings to add partitions and zones.');
     }
 
+    const partitionIds = partitions.map((p) => p.id);
+    const duplicateIds = partitionIds.filter((id, i) => partitionIds.indexOf(id) !== i);
+    if (duplicateIds.length > 0) {
+      log.warn(`Config has duplicate partition IDs: ${[...new Set(duplicateIds)].join(', ')} — remove duplicates from plugin settings`);
+    }
+
     this.driver = new PimaDriver({
       port: config.port ?? 7780,
       account: config.account ?? 1234,
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
     });
 
-    this.driver.on('connected', () => {
-      log.info('alarm panel connected');
+    this.driver.on('connected', () => log.info('alarm panel connected'));
+    this.driver.on('verified', () => {
+      log.debug('panel identity verified — querying partition states');
       this.queryPartitionStates();
     });
     this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
@@ -138,8 +145,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
-    this.driver.on('data', ({ id, startOrder, parameters }) => {
+    this.driver.on('data', ({ id, startOrder, parameters, more }) => {
       if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
+      if (more) {
+        log.warn(`DATA id=2310 returned more=true (startOrder=${startOrder}, count=${parameters.length}); additional pages not fetched`);
+      }
       for (let i = 0; i < parameters.length; i++) {
         const partitionId = startOrder + i;
         const status = Number(parameters[i]);

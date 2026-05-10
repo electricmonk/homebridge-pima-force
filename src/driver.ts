@@ -61,6 +61,8 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   private server: net.Server | null = null;
   private activeSocket: net.Socket | null = null;
   private opCounter: number;
+  /** True once the panel has sent a frame with a matching account number. */
+  private panelVerified = false;
 
   constructor(config: PimaDriverConfig) {
     super();
@@ -240,6 +242,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       this.activeSocket.destroy();
     }
     this.activeSocket = sock;
+    this.panelVerified = false;
     this.emit('connected');
 
     sock.on('data', (buf) => this.handleData(sock, buf));
@@ -259,6 +262,22 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     // been observed in practice on a LAN with the panel.
     for (const frame of parseFrames(buf, this.config.encoding)) {
       this.emit('frameIn', frame as unknown as Record<string, unknown>);
+
+      // Verify the connecting client is our panel by checking its account number
+      // on the first frame. Reject and close if it doesn't match — prevents a
+      // rogue TCP client from triggering DATA-REQ frames that carry user codes.
+      if (!this.panelVerified) {
+        if (Number(frame.account) !== this.config.account) {
+          this.emit('error', new Error(
+            `rejected connection: account=${frame.account} does not match expected ${this.config.account}`,
+          ));
+          sock.destroy();
+          return;
+        }
+        this.panelVerified = true;
+        this.emit('verified');
+      }
+
       if (shouldAck(frame)) {
         const ack = ackFrame(frame);
         this.emit('frameOut', ack);

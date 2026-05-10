@@ -130,40 +130,50 @@ export class PartitionSecuritySystem {
    *   6=Home3     7=Home4     8=Shabbat-ON  9=Shabbat-OFF
    */
   setStateFromStartupStatus(status: number): void {
+    if (status < 1 || status > 9) {
+      this.platform.log.warn(
+        `partition ${this.accessory.context.id}: unexpected startup status ${status}; ignoring`,
+      );
+      return;
+    }
     const C = this.platform.api.hap.Characteristic;
+
+    let newTarget: number;
+    let newLastArmed: number | null;
+
     switch (status) {
       case 3: // FullArmed → AWAY_ARM
-        this.targetState = C.SecuritySystemTargetState.AWAY_ARM;
-        this.currentState = C.SecuritySystemCurrentState.AWAY_ARM;
-        this.lastArmedState = C.SecuritySystemTargetState.AWAY_ARM;
-        this.alarmActive = false;
+        newTarget = C.SecuritySystemTargetState.AWAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.AWAY_ARM;
         break;
       case 4: // Home1 → STAY_ARM
-        this.targetState = C.SecuritySystemTargetState.STAY_ARM;
-        this.currentState = C.SecuritySystemCurrentState.STAY_ARM;
-        this.lastArmedState = C.SecuritySystemTargetState.STAY_ARM;
-        this.alarmActive = false;
+        newTarget = C.SecuritySystemTargetState.STAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.STAY_ARM;
         break;
       case 5: // Home2 → NIGHT_ARM
-        this.targetState = C.SecuritySystemTargetState.NIGHT_ARM;
-        this.currentState = C.SecuritySystemCurrentState.NIGHT_ARM;
-        this.lastArmedState = C.SecuritySystemTargetState.NIGHT_ARM;
-        this.alarmActive = false;
+        newTarget = C.SecuritySystemTargetState.NIGHT_ARM;
+        newLastArmed = C.SecuritySystemTargetState.NIGHT_ARM;
         break;
       case 6: // Home3 — no exact HomeKit equivalent; report as AWAY
       case 7: // Home4 — no exact HomeKit equivalent; report as AWAY
       case 8: // Shabbat-ON — treat as armed
-        this.targetState = C.SecuritySystemTargetState.AWAY_ARM;
-        this.currentState = C.SecuritySystemCurrentState.AWAY_ARM;
-        this.lastArmedState = C.SecuritySystemTargetState.AWAY_ARM;
-        this.alarmActive = false;
+        newTarget = C.SecuritySystemTargetState.AWAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.AWAY_ARM;
         break;
       default: // 1=NotExist, 2=Disarmed, 9=Shabbat-OFF
-        this.targetState = C.SecuritySystemTargetState.DISARM;
-        this.currentState = C.SecuritySystemCurrentState.DISARMED;
-        this.lastArmedState = null;
-        this.alarmActive = false;
+        newTarget = C.SecuritySystemTargetState.DISARM;
+        newLastArmed = null;
         break;
+    }
+
+    this.targetState = newTarget;
+    this.lastArmedState = newLastArmed;
+    // DATA 2310 reports arm mode only; alarm state comes from CID 130.
+    // If an alarm is actively sounding, keep ALARM_TRIGGERED in currentState.
+    if (!this.alarmActive) {
+      this.currentState = (newTarget === C.SecuritySystemTargetState.DISARM)
+        ? C.SecuritySystemCurrentState.DISARMED
+        : newTarget;
     }
     this.pushState();
   }

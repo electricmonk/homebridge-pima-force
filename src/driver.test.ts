@@ -83,6 +83,25 @@ describe('PimaDriver — connection lifecycle', () => {
     assert.equal(h!.driver.isConnected(), true);
   });
 
+  it('emits verified after first frame with matching account', async () => {
+    const verified = once(h!.driver, 'verified');
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":"1234"}');
+    await verified;
+  });
+
+  it('closes connection if first frame has wrong account', async () => {
+    const errEvt = once(h!.driver, 'error');
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":"9999"}');
+    const [err] = await errEvt;
+    assert.match((err as Error).message, /9999/);
+    // Socket should be destroyed.
+    await new Promise<void>((resolve) => {
+      if (h!.alarm.destroyed) return resolve();
+      h!.alarm.once('close', () => resolve());
+    });
+    assert.equal(h!.alarm.destroyed, true);
+  });
+
   it('emits disconnected when the alarm drops', async () => {
     const off = once(h!.driver, 'disconnected');
     h!.alarm.destroy();

@@ -144,6 +144,8 @@ export interface SystemEvent {
  */
 export interface PimaDriverEvents {
   connected: [];
+  /** Emitted after the first frame from the panel passes account verification. */
+  verified: [];
   disconnected: [];
   arm: [ArmEvent];
   disarm: [ArmEvent];
