@@ -23,6 +23,7 @@ import {
   OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
   parseFrames,
   QUALIFIER_NEW,
@@ -157,6 +158,34 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   /** Convenience: request the count of installed zones (parameter id 2148). */
   getZoneCount(): Promise<void> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
+  }
+
+  /**
+   * Query the System Key Status (parameter id 2310) for a single partition,
+   * authenticating with that partition's own user code.
+   * The response arrives as a `data` event with id=2310 and startOrder=partitionId.
+   */
+  getSystemKeyStatus(partitionId: number): Promise<void> {
+    const part = this.partitionByCode.get(partitionId);
+    if (!part) {
+      return Promise.reject(new Error(`partition ${partitionId} not configured`));
+    }
+    return new Promise((resolve, reject) => {
+      const sock = this.activeSocket;
+      if (!sock || sock.destroyed) {
+        return reject(new Error('no active panel connection'));
+      }
+      const reqParams = {
+        account: this.config.account,
+        counter: this.opCounter++,
+        password: part.userCode,
+        id: PARAM_ID_SYSTEM_KEY_STATUS,
+        startOrder: partitionId,
+        stopOrder: partitionId,
+      };
+      this.emit('frameOut', dataReqFrame(reqParams));
+      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+    });
   }
 
   setOutput(output: number, active: boolean): Promise<void> {

@@ -120,6 +120,54 @@ export class PartitionSecuritySystem {
     this.pushState();
   }
 
+  /**
+   * Apply the panel's reported arm state from a System Key Status response
+   * (DATA frame id=2310) received on startup/reconnect. Maps Pima status
+   * values to the closest HomeKit state.
+   *
+   * Status values (from PROTOCOL.md):
+   *   1=NotExist  2=Disarmed  3=FullArmed  4=Home1  5=Home2
+   *   6=Home3     7=Home4     8=Shabbat-ON  9=Shabbat-OFF
+   */
+  setStateFromStartupStatus(status: number): void {
+    const C = this.platform.api.hap.Characteristic;
+    switch (status) {
+      case 3: // FullArmed → AWAY_ARM
+        this.targetState = C.SecuritySystemTargetState.AWAY_ARM;
+        this.currentState = C.SecuritySystemCurrentState.AWAY_ARM;
+        this.lastArmedState = C.SecuritySystemTargetState.AWAY_ARM;
+        this.alarmActive = false;
+        break;
+      case 4: // Home1 → STAY_ARM
+        this.targetState = C.SecuritySystemTargetState.STAY_ARM;
+        this.currentState = C.SecuritySystemCurrentState.STAY_ARM;
+        this.lastArmedState = C.SecuritySystemTargetState.STAY_ARM;
+        this.alarmActive = false;
+        break;
+      case 5: // Home2 → NIGHT_ARM
+        this.targetState = C.SecuritySystemTargetState.NIGHT_ARM;
+        this.currentState = C.SecuritySystemCurrentState.NIGHT_ARM;
+        this.lastArmedState = C.SecuritySystemTargetState.NIGHT_ARM;
+        this.alarmActive = false;
+        break;
+      case 6: // Home3 — no exact HomeKit equivalent; report as AWAY
+      case 7: // Home4 — no exact HomeKit equivalent; report as AWAY
+      case 8: // Shabbat-ON — treat as armed
+        this.targetState = C.SecuritySystemTargetState.AWAY_ARM;
+        this.currentState = C.SecuritySystemCurrentState.AWAY_ARM;
+        this.lastArmedState = C.SecuritySystemTargetState.AWAY_ARM;
+        this.alarmActive = false;
+        break;
+      default: // 1=NotExist, 2=Disarmed, 9=Shabbat-OFF
+        this.targetState = C.SecuritySystemTargetState.DISARM;
+        this.currentState = C.SecuritySystemCurrentState.DISARMED;
+        this.lastArmedState = null;
+        this.alarmActive = false;
+        break;
+    }
+    this.pushState();
+  }
+
   setAlarmTriggered(triggered: boolean): void {
     const C = this.platform.api.hap.Characteristic;
     this.alarmActive = triggered;

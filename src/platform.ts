@@ -7,7 +7,7 @@ import type {
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
-import { OUTPUT_EXTERNAL_SIREN } from './protocol.js';
+import { OUTPUT_EXTERNAL_SIREN, PARAM_ID_SYSTEM_KEY_STATUS } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
@@ -83,7 +83,10 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
     });
 
-    this.driver.on('connected',    () => log.info('alarm panel connected'));
+    this.driver.on('connected', () => {
+      log.info('alarm panel connected');
+      this.queryPartitionStates();
+    });
     this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
 
@@ -135,6 +138,18 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
+    this.driver.on('data', ({ id, startOrder, parameters }) => {
+      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
+      for (let i = 0; i < parameters.length; i++) {
+        const partitionId = startOrder + i;
+        const status = Number(parameters[i]);
+        const acc = this.partitions.get(partitionId);
+        if (acc) {
+          log.info(`partition ${partitionId} startup state: ${status}`);
+          acc.setStateFromStartupStatus(status);
+        }
+      }
+    });
     this.driver.on('nak', ({ counter, account, reason }) => {
       // The panel rejected an OPERATION/ACK we sent. Log loudly so the user
       // can see why a command (e.g. siren mute) silently didn't take effect.
@@ -164,6 +179,15 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
   configureAccessory(accessory: PlatformAccessory<AnyContext>): void {
     this.cachedAccessories.set(accessory.UUID, accessory);
+  }
+
+  private queryPartitionStates(): void {
+    const partitions = this.config.partitions ?? [];
+    for (const p of partitions) {
+      this.driver.getSystemKeyStatus(p.id).catch((err: Error) => {
+        this.log.warn(`failed to query state for partition ${p.id}: ${err.message}`);
+      });
+    }
   }
 
   private noteUnknownPartition(id: number, what: string): void {

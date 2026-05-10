@@ -369,6 +369,58 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     assert.equal(siren?.type, 'Switch');
   });
 
+  it('on panel connect, queries partition state via DATA-REQ and reflects arm status', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      // The platform sends a DATA-REQ (id=2310) for each partition immediately
+      // on connect (before any alarm-originated frames arrive).
+      const deadline = Date.now() + 5000;
+      let req: Record<string, unknown> | undefined;
+      while (Date.now() < deadline) {
+        req = alarm.received.find(
+          (f) => f.frame_type === 'DATA-REQ' && f.id === 2310 && f.start_order === 2,
+        );
+        if (req) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(
+        req,
+        `expected DATA-REQ for system key status (id=2310, partition 2) on connect; got: ${JSON.stringify(alarm.received)}`,
+      );
+
+      // Respond: partition 2 = FullArmed (status 3) → HomeKit AWAY_ARM (1)
+      alarm.send({
+        frame_type: 'DATA',
+        counter: req.counter as number,
+        account: String(fix.account),
+        id: 2310,
+        start_order: 2,
+        parameters: ['3'],
+      });
+
+      // E2E Partition (id 2) should update to AWAY_ARM (1).
+      const acc = await waitForAccessoryState(
+        fix, 'E2E Partition', (a) => a.values.SecuritySystemCurrentState === 1,
+      );
+      assert.equal(acc.values.SecuritySystemCurrentState, 1);
+
+      // Reset to disarmed so this test doesn't affect later tests.
+      alarm.send({
+        frame_type: 'DATA',
+        counter: (req.counter as number) + 1,
+        account: String(fix.account),
+        id: 2310,
+        start_order: 2,
+        parameters: ['2'],
+      });
+      await waitForAccessoryState(
+        fix, 'E2E Partition', (a) => a.values.SecuritySystemCurrentState === 3,
+      );
+    } finally {
+      alarm.close();
+    }
+  });
+
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
     const alarm = await fix.connectAlarm();
     try {

@@ -253,6 +253,24 @@ describe('PimaDriver — send side (arm/disarm)', () => {
       stop_order: 1,
     });
   });
+
+  it('getSystemKeyStatus(2) sends a DATA-REQ with id=2310 using partition 2 code', async () => {
+    await h!.driver.getSystemKeyStatus(2);
+    await waitForRx(h!, 1);
+    assert.deepEqual(h!.rxFromDriver[0], {
+      frame_type: 'DATA-REQ',
+      counter: 5000,
+      account: 1234,
+      password: '2222',
+      id: 2310,
+      start_order: 2,
+      stop_order: 2,
+    });
+  });
+
+  it('getSystemKeyStatus() rejects for an unconfigured partition', async () => {
+    await assert.rejects(h!.driver.getSystemKeyStatus(99), /partition 99 not configured/);
+  });
 });
 
 describe('PimaDriver — send without connection', () => {
