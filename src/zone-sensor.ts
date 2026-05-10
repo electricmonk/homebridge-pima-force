@@ -5,7 +5,6 @@ import type { ZoneType } from './types.js';
 export interface ZoneAccessoryContext {
   kind: 'zone';
   zone: number;
-  partition: number;
   name: string;
   type: ZoneType;
 }
@@ -76,7 +75,7 @@ export class ZoneSensor {
     private readonly accessory: PlatformAccessory<ZoneAccessoryContext>,
   ) {
     const { Characteristic, Service: HapService } = platform.api.hap;
-    const { zone, partition, type } = accessory.context;
+    const { zone, type } = accessory.context;
     const allBindings = bindingsFor(platform);
     this.binding = allBindings[type] ?? allBindings.contact;
 
@@ -84,7 +83,7 @@ export class ZoneSensor {
       .getService(HapService.AccessoryInformation)!
       .setCharacteristic(Characteristic.Manufacturer, 'Pima')
       .setCharacteristic(Characteristic.Model, `FORCE Zone (${type})`)
-      .setCharacteristic(Characteristic.SerialNumber, `partition-${partition}-zone-${zone}`);
+      .setCharacteristic(Characteristic.SerialNumber, `zone-${zone}`);
 
     // Remove any sibling sensor service from a previous type so we don't
     // leave a stale ContactSensor next to a fresh MotionSensor when the

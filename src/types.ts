@@ -22,13 +22,28 @@ export interface PimaDriverConfig {
    * Text encoding the panel uses for non-ASCII string values (zone names,
    * user names, etc.). JSON syntax characters are ASCII either way, so the
    * frame parses regardless; this only affects how we decode string
-   * contents. Default `'utf-8'`. For Israeli FORCE panels with Hebrew
-   * names, use `'windows-1255'`.
+   * contents. Default `'windows-1255'` (for Israeli FORCE panels with
+   * Hebrew names). Override to `'utf-8'` or another encoding if your panel
+   * returns ASCII/Latin names.
    *
    * Anything supported by the global `TextDecoder` is accepted —
    * `'utf-8'`, `'windows-1255'`, `'iso-8859-8'`, `'iso-8859-1'`, etc.
    */
   encoding?: string;
+  /**
+   * When true, reverse the order of code points in every string value
+   * returned in DATA responses. Pima FORCE panels often store text in
+   * "visual order" (the order of pixels on the LCD, left-to-right) rather
+   * than logical order. Modern Unicode systems expect logical order and
+   * apply right-to-left rendering via bidi; without this flag, Hebrew zone
+   * names appear letter-reversed.
+   *
+   * Reverses *all* string parameters when enabled — leave off if the panel
+   * already returns logical-order strings.
+   *
+   * @deprecated Will be removed in a future release once we confirm no panels require it.
+   */
+  reverseStrings?: boolean;
 }
 
 /**

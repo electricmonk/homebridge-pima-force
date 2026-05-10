@@ -219,6 +219,13 @@ describe('PimaDriver — receive side', () => {
     assert.equal(event.more, true);
   });
 
+  it('does not reverse parameter strings unless reverseStrings is enabled', async () => {
+    const off = once(h!.driver, 'data');
+    h!.alarm.write('{"frame_type":"DATA","counter":82,"account":"1234","id":260,"start_order":1,"parameters":["abc","דלת"]}');
+    const [event] = await off;
+    assert.deepEqual(event.parameters, ['abc', 'דלת']);
+  });
+
   it('emits unknown for unrecognized event types', async () => {
     const off = once(h!.driver, 'unknown');
     h!.alarm.write('{"frame_type":"event","counter":70,"account":"1234","type":999,"qualifier":1,"zone":1,"partition":1}');
@@ -322,6 +329,78 @@ describe('PimaDriver — send side (arm/disarm)', () => {
   it('getSystemKeyStatus() rejects for an unconfigured partition', async () => {
     await assert.rejects(h!.driver.getSystemKeyStatus(99), /partition 99 not configured/);
   });
+
+  it('requestData uses params.password instead of partition userCode when both are present', async () => {
+    await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16, password: '9999' });
+    await waitForRx(h!, 1);
+    assert.equal(h!.rxFromDriver[0].password, '9999');
+    assert.equal(h!.rxFromDriver[0].id, 260);
+  });
+
+  it('requestData resolves with the counter used in the DATA-REQ frame', async () => {
+    const counter = await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 1 });
+    await waitForRx(h!, 1);
+    assert.equal(typeof counter, 'number', 'requestData should resolve with a number');
+    assert.equal(counter, h!.rxFromDriver[0].counter, 'resolved counter should match the counter sent in the DATA-REQ');
+  });
+});
+
+describe('PimaDriver — requestData password override', () => {
+  it('requestData succeeds with params.password when no partitions configured', async () => {
+    const driver = new PimaDriver({
+      port: 0,
+      account: 5678,
+      partitions: [],
+      opCounterStart: 1,
+    });
+    await driver.start();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const addr = ((driver as any).server as net.Server).address() as net.AddressInfo;
+    const connected = once(driver, 'connected');
+    const verified = once(driver, 'verified');
+    const rxFromDriver: Array<Record<string, unknown>> = [];
+    const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
+    sock.on('data', (buf) => {
+      const text = buf.toString('utf8');
+      for (const part of text.split(/(?<=\})(?=\{)/)) {
+        try { rxFromDriver.push(JSON.parse(part)); } catch { /* ignore */ }
+      }
+    });
+    await connected;
+    // Send a heartbeat with the matching account so the driver flips
+    // `panelVerified=true` and will accept outbound DATA-REQs.
+    sock.write('{"frame_type":"null","counter":1,"account":"5678"}');
+    await verified;
+
+    await driver.requestData({ id: 260, startOrder: 1, password: 'override' });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 1000;
+      const poll = (): void => {
+        // First frame is the ACK to the heartbeat; the DATA-REQ is the second.
+        if (rxFromDriver.length >= 2) return resolve();
+        if (Date.now() > deadline) return reject(new Error('timeout waiting for DATA-REQ'));
+        setTimeout(poll, 5);
+      };
+      poll();
+    });
+    const dataReq = rxFromDriver.find((f) => f.frame_type === 'DATA-REQ');
+    assert.ok(dataReq, 'expected a DATA-REQ frame');
+    assert.equal(dataReq!.password, 'override');
+    assert.equal(dataReq!.id, 260);
+
+    sock.destroy();
+    await driver.stop();
+  });
+
+  it('requestData rejects when no partitions and no password', async () => {
+    const driver = new PimaDriver({ port: 0, account: 5678, partitions: [] });
+    await driver.start();
+    await assert.rejects(
+      driver.requestData({ id: 260, startOrder: 1 }),
+      /no partition configured to derive a user code for DATA-REQ/,
+    );
+    await driver.stop();
+  });
 });
 
 describe('PimaDriver — send without connection', () => {
@@ -333,6 +412,31 @@ describe('PimaDriver — send without connection', () => {
     });
     await driver.start();
     await assert.rejects(driver.arm(1), /no active panel connection/);
+    await driver.stop();
+  });
+});
+
+describe('PimaDriver — reverseStrings option', () => {
+  it('reverses every string parameter in DATA responses when enabled', async () => {
+    const driver = new PimaDriver({
+      port: 0,
+      account: 1234,
+      partitions: [{ id: 1, userCode: '1111' }],
+      reverseStrings: true,
+    });
+    await driver.start();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const addr = ((driver as any).server as net.Server).address() as net.AddressInfo;
+    const connected = once(driver, 'connected');
+    const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
+    await connected;
+    const off = once(driver, 'data');
+    sock.write('{"frame_type":"DATA","counter":1,"account":"1234","id":260,"start_order":1,"parameters":["abc","תלד"]}');
+    const [event] = await off;
+    // 'abc' reversed → 'cba'; visual-order Hebrew 'תלד' (=ת,ל,ד) reversed
+    // to logical-order 'דלת' (=ד,ל,ת).
+    assert.deepEqual(event.parameters, ['cba', 'דלת']);
+    sock.destroy();
     await driver.stop();
   });
 });
