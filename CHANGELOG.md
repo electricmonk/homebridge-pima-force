@@ -1,3 +1,11 @@
+## [0.1.12](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.11...v0.1.12) (2026-05-10)
+
+### Bug Fixes
+
+* do not start driver when no partitions are configured ([a701760](https://github.com/electricmonk/homebridge-pima-force/commit/a7017602389878b8b5e6fa8bc9bc01ee8626fcfc))
+* **e2e:** filter bridge accessory from unconfigured-plugin accessory assertion ([9234717](https://github.com/electricmonk/homebridge-pima-force/commit/92347174e6561dbcc62ebca06d8fec3c75b008bb))
+* **e2e:** replace sleep with polling loop in unconfigured port test ([e5ac865](https://github.com/electricmonk/homebridge-pima-force/commit/e5ac865757c951e8153e497d383047f113b97eb9))
+
 ## [0.1.11](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.10...v0.1.11) (2026-05-10)
 
 ### Features
