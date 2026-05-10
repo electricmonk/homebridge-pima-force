@@ -2,11 +2,15 @@ name: CI
 
 # CI runs on every push and PR. The release job runs only on pushes to master:
 # it patch-bumps the version, commits + tags back to master with [skip ci],
-# and publishes to npm via the GitHub Trusted Publisher (OIDC) flow.
+# publishes to npm with provenance, and creates a GitHub Release.
+#
+# Publish lives in this job (not a separate tag-triggered workflow) because
+# tags pushed by the default GITHUB_TOKEN do not trigger `on: push: tags`
+# workflows.
 #
 # No NPM_TOKEN secret is required — the GitHub OIDC token is exchanged for
 # an npm publish token automatically when `npm publish --provenance` runs
-# in a workflow that has `id-token: write` permission.
+# in a job that has `id-token: write` permission (Trusted Publisher).
 
 on:
   push:
@@ -42,20 +46,40 @@ jobs:
       - run: npm run test:integration
       - run: npm run test:e2e
 
+  check-changes:
+      name: Check for code changes
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      runs-on: ubuntu-latest
+      outputs:
+        code: ${{ steps.filter.outputs.code }}
+      steps:
+        - uses: actions/checkout@v4
+        - uses: dorny/paths-filter@v3
+          id: filter
+          with:
+            filters: |
+              code:
+                - 'src/**'
+                - 'package.json'
+                - 'package-lock.json'
+                - 'tsconfig.json'
+                - 'config.schema.json'
   release:
-    name: Bump and publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: test
+    name: Release
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.check-changes.outputs.code == 'true'
+    needs: [test, check-changes]
     runs-on: ubuntu-latest
     permissions:
-      # Push the version bump + tag back to master.
+      # contents: write — push the version bump + tag, create the GH Release.
+      # id-token: write — npm Trusted Publisher OIDC token exchange + provenance.
       contents: write
-      # Required for npm provenance + Trusted Publisher OIDC token exchange.
       id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so npm version can compute correctly relative to tags.
           fetch-depth: 0
           # Use the default GITHUB_TOKEN; `contents: write` lets us push.
           # If master has branch protection that blocks bot pushes, allow
@@ -64,10 +88,6 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # Use current LTS for publish (this job doesn't run user code) so
-          # we get an npm CLI new enough for Trusted Publishing — TP needs
-          # npm 11.5+. The test job still exercises Node 20 to honor
-          # package.json `engines.node: ">=20"`.
           node-version: '24.x'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
@@ -79,23 +99,47 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump patch, commit, tag
+      - name: Bump patch, prepare notes, commit, tag
         id: bump
         run: |
           # --no-git-tag-version: don't auto-commit/tag; we do it ourselves
           # so we can include [skip ci] and push commit + tag in one shot.
-          new_version=$(npm version patch --no-git-tag-version)
+          # The `version` script in package.json runs conventional-changelog,
+          # which prepends a new section to CHANGELOG.md.
+          npm version patch --no-git-tag-version
+
+          # Extract + validate release notes BEFORE any side effects (commit,
+          # tag, push, npm publish). A malformed CHANGELOG aborts the release
+          # cleanly with no remote state changed.
+          awk '/^## \[/{n++; if(n>1) exit} /^# Changelog/{exit} {print}' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ] || ! head -n 1 /tmp/notes.md | grep -q '^## \['; then
+            echo "::error::release notes are empty or don't start with '## [' — aborting before any push"
+            head -n 5 /tmp/notes.md || true
+            exit 1
+          fi
+
+          git add package.json package-lock.json CHANGELOG.md
+          new_version=$(node -p "require('./package.json').version")
+          tag="v$new_version"
+          git commit -m "Bump version to $new_version [skip ci]"
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-          git tag -a "$new_version" -m "$new_version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git tag "$tag"
           git push origin HEAD:master
-          git push origin "$new_version"
-          echo "Released $new_version"
+          git push origin "$tag"
+          echo "Released $tag"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # /tmp/notes.md was extracted and validated in the bump step.
+          gh release create "${{ steps.bump.outputs.tag }}" \
+            --title "${{ steps.bump.outputs.tag }}" \
+            --notes-file /tmp/notes.md
 
       - name: Build
         run: npm run build
+
       - name: Publish to npm with provenance (OIDC)
-        # No NODE_AUTH_TOKEN env: with `id-token: write` and a Trusted
-        # Publisher configured on npm for this repo, the npm CLI exchanges
-        # the GitHub OIDC token for a short-lived publish token at the
-        # registry. --provenance attaches a verifiable build attestation.
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public            
