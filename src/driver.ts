@@ -126,9 +126,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * the panel rejects). Authorization uses the first configured partition's
    * user code, same as output operations.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number }): Promise<void> {
+  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<void> {
     const part = this.config.partitions[0];
-    if (!part) {
+    if (!part && !params.password) {
       return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
     }
     return new Promise((resolve, reject) => {
@@ -139,7 +139,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       const reqParams = {
         account: this.config.account,
         counter: this.opCounter++,
-        password: part.userCode,
+        password: params.password ?? part!.userCode,
         id: params.id,
         startOrder: params.startOrder,
         stopOrder: params.stopOrder,

@@ -24,6 +24,8 @@
  *   siren off                shortcut for `output deactivate 1`
  *   zones count              ask the panel how many zones are installed
  *   zones names [N [M]]      ask for zone names (default first 16; second arg = stop)
+ *   req <id> <start> [stop] [pw]  raw DATA-REQ for any parameter id; pw overrides P1's user code
+ *   discover <master-code>   onboarding flow: enumerate partitions + arm/disarm cycle to map zones
  *   debug on|off             toggle wire-frame logging at runtime
  *   status
  *   quit
@@ -59,6 +61,177 @@ function ts(): string {
 
 function log(msg: string): void {
   process.stdout.write(`[${ts()}] ${msg}\n`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+interface ZoneStatusBits {
+  zone: number;
+  armed: boolean;
+  open: boolean;
+  raw: number;
+}
+
+// Parse one entry of param 2149. Last byte = zone#, upper bytes = bitfield (LSB-indexed).
+// Bit 10 = Armed, bit 11 = Open. See PROTOCOL.md "Zone Status bits (id 2149)".
+function parseZoneStatusEntry(hex: string): ZoneStatusBits | null {
+  if (hex.length < 2) return null;
+  const zone = parseInt(hex.slice(-2), 16);
+  if (!zone) return null;
+  const upper = hex.length > 2 ? parseInt(hex.slice(0, -2), 16) : 0;
+  return {
+    zone,
+    armed: (upper & (1 << 10)) !== 0,
+    open: (upper & (1 << 11)) !== 0,
+    raw: upper,
+  };
+}
+
+function parseZoneStatus(parameters: string[]): Map<number, ZoneStatusBits> {
+  const m = new Map<number, ZoneStatusBits>();
+  for (const hex of parameters) {
+    const e = parseZoneStatusEntry(hex);
+    if (e) m.set(e.zone, e);
+  }
+  return m;
+}
+
+// Wait for a DATA event matching id+startOrder, or any NAK (which the panel
+// often emits with counter=0 for parse failures, so we can't match it precisely).
+function awaitData(id: number, startOrder: number, timeoutMs = 5000): Promise<{ parameters: string[]; more: boolean }> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      driver.off('data', dataHandler);
+      driver.off('nak', nakHandler);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timeout waiting for DATA id=${id} start=${startOrder}`));
+    }, timeoutMs);
+    const dataHandler = (msg: { id: number; startOrder: number; parameters: string[]; more: boolean }): void => {
+      if (msg.id === id && msg.startOrder === startOrder) {
+        cleanup();
+        resolve({ parameters: msg.parameters, more: msg.more });
+      }
+    };
+    const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
+      cleanup();
+      reject(new Error(`NAK: ${reason} (counter=${counter ?? '?'})`));
+    };
+    driver.on('data', dataHandler);
+    driver.on('nak', nakHandler);
+  });
+}
+
+// Request a parameter and await the matching DATA response in one step.
+async function reqAndAwait(
+  id: number,
+  startOrder: number,
+  stopOrder: number | undefined,
+  password: string,
+): Promise<{ parameters: string[]; more: boolean }> {
+  const wait = awaitData(id, startOrder);
+  await driver.requestData({ id, startOrder, stopOrder, password });
+  return wait;
+}
+
+async function discover(masterCode: string): Promise<void> {
+  log(`>> discover: starting`);
+
+  // 1) Zone count.
+  const countRes = await reqAndAwait(2148, 1, 1, masterCode);
+  const zoneCount = Number(countRes.parameters[0] ?? 0);
+  if (!zoneCount) throw new Error('zone count returned empty/zero');
+  log(`   installed zones: ${zoneCount}`);
+
+  // 2) Zone names (paginated).
+  const names = new Map<number, string>();
+  let cursor = 1;
+  while (cursor <= zoneCount) {
+    const stop = Math.min(cursor + 15, zoneCount);
+    const res = await reqAndAwait(260, cursor, stop, masterCode);
+    res.parameters.forEach((name, i) => {
+      const z = cursor + i;
+      const trimmed = name.trim();
+      if (trimmed) names.set(z, trimmed);
+    });
+    cursor = stop + 1;
+  }
+  log(`   collected ${names.size} non-empty zone names`);
+
+  // 3) Enumerate partitions via 2310 (1=NotExist, 2=Disarmed, 3+=armed in some mode).
+  const keyRes = await reqAndAwait(2310, 1, 16, masterCode);
+  const existing: { partition: number; armed: boolean; state: number }[] = [];
+  keyRes.parameters.forEach((s, i) => {
+    const state = Number(s);
+    if (state !== 1) existing.push({ partition: i + 1, armed: state >= 3, state });
+  });
+  if (existing.length === 0) throw new Error('no partitions found via 2310 — is the master code correct?');
+  log(`   partitions: ${existing.map((p) => `P${p.partition}(${p.armed ? `armed/state=${p.state}` : 'disarmed'})`).join(', ')}`);
+
+  // 4) For each partition: snapshot 2149 with its user code (or master if not configured),
+  //    arm-then-disarm if disarmed, and deduce zone membership.
+  const zoneToPartition = new Map<number, number>();
+
+  for (const p of existing) {
+    const partCfg = partitions.find((cfg) => cfg.id === p.partition);
+    const code = partCfg?.userCode ?? masterCode;
+    const codeLabel = partCfg ? `P${p.partition} code` : 'master code';
+
+    log(`-- P${p.partition} (using ${codeLabel}) --`);
+    const before = parseZoneStatus((await reqAndAwait(2149, 1, 144, code)).parameters);
+    const beforeZones = [...before.keys()].sort((a, b) => a - b);
+    log(`   before: zones [${beforeZones.join(',')}] (${beforeZones.length})`);
+
+    // Safety: any zone currently Open means arming would trip it past the exit delay.
+    // For 24h zones, "Open" means active right now (smoke detector firing) — also a hard abort.
+    const openZones = [...before.values()].filter((z) => z.open).map((z) => z.zone);
+    if (!p.armed && openZones.length > 0) {
+      log(`   ! P${p.partition}: ${openZones.length} zone(s) currently OPEN (${openZones.join(',')}) — skipping arm cycle`);
+      beforeZones.forEach((z) => zoneToPartition.set(z, p.partition));
+      continue;
+    }
+
+    if (p.armed) {
+      // Already armed — `before` already contains all zones on this partition.
+      log(`   P${p.partition} already armed; using current snapshot`);
+      beforeZones.forEach((z) => zoneToPartition.set(z, p.partition));
+      continue;
+    }
+
+    // Arm AWAY → snapshot → disarm. `try/finally` ensures disarm runs.
+    log(`   P${p.partition}: arming AWAY...`);
+    try {
+      await driver.arm(p.partition, 'away');
+      await sleep(500); // give the panel a beat to flip Armed bits
+      const during = parseZoneStatus((await reqAndAwait(2149, 1, 144, code)).parameters);
+      const duringZones = [...during.keys()].sort((a, b) => a - b);
+      log(`   armed:  zones [${duringZones.join(',')}] (${duringZones.length})`);
+      duringZones.forEach((z) => zoneToPartition.set(z, p.partition));
+      beforeZones.forEach((z) => zoneToPartition.set(z, p.partition));
+    } finally {
+      log(`   P${p.partition}: disarming...`);
+      await driver.disarm(p.partition).catch((e) => log(`   ! disarm failed: ${(e as Error).message}`));
+      // Brief pause so the next iteration's DATA-REQ doesn't race the panel's
+      // ACK of our disarm OPERATION (panel NAKs back-to-back coalesced frames).
+      await sleep(500);
+    }
+  }
+
+  // 5) Print final map.
+  log('=== Discovery result ===');
+  for (let z = 1; z <= zoneCount; z++) {
+    const part = zoneToPartition.get(z);
+    const name = names.get(z) ?? '(unnamed)';
+    log(`   zone ${String(z).padStart(3)}  P${part ?? '?'}  ${name}`);
+  }
+  const unmapped = Array.from({ length: zoneCount }, (_, i) => i + 1).filter((z) => !zoneToPartition.has(z));
+  if (unmapped.length) {
+    log(`   ! ${unmapped.length} zones unmapped: ${unmapped.join(',')} — likely non-24h zones on a partition that we couldn't safely arm (open zones, or no per-partition code)`);
+  }
 }
 
 const driver = new PimaDriver({
@@ -141,7 +314,7 @@ driver.on('frameOut', (frame) => {
 
 await driver.start();
 log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | encoding=${ENCODING}${REVERSE_STRINGS ? ' (reversed)' : ''} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
-log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | zones count|names [start [stop]] | debug on|off | status | quit');
+log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | zones count|names [start [stop]] | req <id> <start> [stop] | debug on|off | status | quit');
 
 const rl = readline.createInterface({ input: process.stdin });
 
@@ -201,6 +374,35 @@ rl.on('line', async (line) => {
           return;
         }
         return log('usage: zones count | zones names [start [stop]]');
+      }
+      case 'req': {
+        const id = Number(rest[0]);
+        const start = Number(rest[1] ?? 1);
+        // Optional 3rd arg may be `stop` (number) or `pw` (string) when stop is omitted.
+        // Optional 4th arg is always `pw` (overrides the configured user code).
+        let stop: number | undefined;
+        let pw: string | undefined;
+        if (rest[2] !== undefined) {
+          if (/^\d+$/.test(rest[2])) stop = Number(rest[2]);
+          else pw = rest[2];
+        }
+        if (rest[3] !== undefined) pw = rest[3];
+        if (!id || !start || (stop !== undefined && stop < start)) {
+          return log('usage: req <id> <start> [stop] [pw]  — raw DATA-REQ; pw overrides the configured user code');
+        }
+        log(`>> DATA-REQ id=${id} start=${start}${stop !== undefined ? ` stop=${stop}` : ''}${pw ? ` pw=***` : ''}`);
+        await driver.requestData({ id, startOrder: start, stopOrder: stop, password: pw });
+        return;
+      }
+      case 'discover': {
+        const code = rest[0];
+        if (!code) return log('usage: discover <master-code>  — orchestrates names + partition enumeration + arm/disarm cycle');
+        try {
+          await discover(code);
+        } catch (e) {
+          log(`discover failed: ${(e as Error).message}`);
+        }
+        return;
       }
       case 'debug': {
         if (rest[0] === 'on') { debug = true; log('debug ON'); }
