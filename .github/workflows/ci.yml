@@ -80,6 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}          
           fetch-depth: 0
           # Use the default GITHUB_TOKEN; `contents: write` lets us push.
           # If master has branch protection that blocks bot pushes, allow
