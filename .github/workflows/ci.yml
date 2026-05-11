@@ -25,12 +25,15 @@ concurrency:
 
 jobs:
   test:
-    name: Test (Node ${{ matrix.node-version }})
+    name: Test (Node ${{ matrix.node-version }}, HB ${{ matrix.homebridge-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         node-version: ['22.x', '24.x']
+        homebridge-version: ['^1.8.0', '^2.0.0']
+    env:
+      HB_VERSION: ${{ matrix.homebridge-version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,6 +44,7 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
+      - run: npm run install:homebridge
       - run: npm run build
       - run: npm run test:unit
       - run: npm run test:integration
@@ -138,6 +142,9 @@ jobs:
           gh release create "${{ steps.bump.outputs.tag }}" \
             --title "${{ steps.bump.outputs.tag }}" \
             --notes-file /tmp/notes.md
+
+      - name: Install Homebridge (for tsc types)
+        run: npm run install:homebridge
 
       - name: Build
         run: npm run build

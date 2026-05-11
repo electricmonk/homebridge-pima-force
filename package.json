@@ -34,14 +34,13 @@
     "build": "tsc",
     "version": "conventional-changelog -p conventionalcommits && git add CHANGELOG.md",
     "cli": "tsx src/cli.ts",
+    "install:homebridge": "npm install --no-save homebridge@${HB_VERSION:-^2.0.0} homebridge-config-ui-x@^5.22.0",
     "hb:dev:link": "ln -sfn .. node_modules/homebridge-pima-force",
     "hb:dev": "npm run hb:dev:link && npm run build && npx hb-service run -U ./hb-dev -P .",
-    "test": "npm run hb:dev:link && npm run build && node --import tsx --test src/*.test.ts",
+    "test": "npm run install:homebridge && npm run hb:dev:link && npm run build && node --import tsx --test src/*.test.ts",
     "test:unit": "node --import tsx --test src/protocol.test.ts",
     "test:integration": "node --import tsx --test src/driver.test.ts",
-    "test:e2e": "npm run hb:dev:link && npm run build && node --import tsx --test src/e2e.test.ts",
-    "test:e2e:hb2": "npm install homebridge@^2.0.0 --no-save --legacy-peer-deps && npm run test:e2e",
-    "test:e2e:all-hb": "bash scripts/e2e-hb-versions.sh"
+    "test:e2e": "npm run install:homebridge && npm run hb:dev:link && npm run build && node --import tsx --test src/e2e.test.ts"
   },
   "keywords": [
     "homebridge-plugin",
@@ -60,8 +59,6 @@
     "@types/node": "^24.0.0",
     "conventional-changelog": "^7.2.0",
     "conventional-changelog-conventionalcommits": "^9.3.1",
-    "homebridge": "^1.8.0",
-    "homebridge-config-ui-x": "^5.22.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }
