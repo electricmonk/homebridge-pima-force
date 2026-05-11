@@ -120,6 +120,64 @@ export class PartitionSecuritySystem {
     this.pushState();
   }
 
+  /**
+   * Apply the panel's reported arm state from a System Key Status response
+   * (DATA frame id=2310) received on startup/reconnect. Maps Pima status
+   * values to the closest HomeKit state.
+   *
+   * Status values (from PROTOCOL.md):
+   *   1=NotExist  2=Disarmed  3=FullArmed  4=Home1  5=Home2
+   *   6=Home3     7=Home4     8=Shabbat-ON  9=Shabbat-OFF
+   */
+  setStateFromStartupStatus(status: number): void {
+    if (status < 1 || status > 9) {
+      this.platform.log.warn(
+        `partition ${this.accessory.context.id}: unexpected startup status ${status}; ignoring`,
+      );
+      return;
+    }
+    const C = this.platform.api.hap.Characteristic;
+
+    let newTarget: number;
+    let newLastArmed: number | null;
+
+    switch (status) {
+      case 3: // FullArmed → AWAY_ARM
+        newTarget = C.SecuritySystemTargetState.AWAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.AWAY_ARM;
+        break;
+      case 4: // Home1 → STAY_ARM
+        newTarget = C.SecuritySystemTargetState.STAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.STAY_ARM;
+        break;
+      case 5: // Home2 → NIGHT_ARM
+        newTarget = C.SecuritySystemTargetState.NIGHT_ARM;
+        newLastArmed = C.SecuritySystemTargetState.NIGHT_ARM;
+        break;
+      case 6: // Home3 — no exact HomeKit equivalent; report as AWAY
+      case 7: // Home4 — no exact HomeKit equivalent; report as AWAY
+      case 8: // Shabbat-ON — treat as armed
+        newTarget = C.SecuritySystemTargetState.AWAY_ARM;
+        newLastArmed = C.SecuritySystemTargetState.AWAY_ARM;
+        break;
+      default: // 1=NotExist, 2=Disarmed, 9=Shabbat-OFF
+        newTarget = C.SecuritySystemTargetState.DISARM;
+        newLastArmed = null;
+        break;
+    }
+
+    this.targetState = newTarget;
+    this.lastArmedState = newLastArmed;
+    // DATA 2310 reports arm mode only; alarm state comes from CID 130.
+    // If an alarm is actively sounding, keep ALARM_TRIGGERED in currentState.
+    if (!this.alarmActive) {
+      this.currentState = (newTarget === C.SecuritySystemTargetState.DISARM)
+        ? C.SecuritySystemCurrentState.DISARMED
+        : newTarget;
+    }
+    this.pushState();
+  }
+
   setAlarmTriggered(triggered: boolean): void {
     const C = this.platform.api.hap.Characteristic;
     this.alarmActive = triggered;

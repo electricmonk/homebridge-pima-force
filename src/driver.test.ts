@@ -53,6 +53,21 @@ async function setupConnected(): Promise<Harness> {
   return { driver, port: addr.port, alarm, rxFromDriver };
 }
 
+/**
+ * Like setupConnected, but also sends a heartbeat with the correct account
+ * so panelVerified flips to true before the tests run. Clears rxFromDriver
+ * so tests only see frames sent AFTER verification.
+ */
+async function setupVerified(): Promise<Harness> {
+  const h = await setupConnected();
+  const verified = once(h.driver, 'verified');
+  h.alarm.write('{"frame_type":"null","counter":1,"account":"1234"}');
+  await verified;
+  await waitForRx(h, 1); // wait for the ACK back to the alarm
+  h.rxFromDriver.splice(0); // discard the ACK; tests start with a clean slate
+  return h;
+}
+
 async function teardown(h: Harness | null): Promise<void> {
   if (!h) return;
   h.alarm.destroy();
@@ -81,6 +96,42 @@ describe('PimaDriver — connection lifecycle', () => {
 
   it('emits connected when the alarm dials in', () => {
     assert.equal(h!.driver.isConnected(), true);
+  });
+
+  it('emits verified after first frame with matching account', async () => {
+    const verified = once(h!.driver, 'verified');
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":"1234"}');
+    await verified;
+  });
+
+  it('closes connection if first frame has wrong account', async () => {
+    const errEvt = once(h!.driver, 'error');
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":"9999"}');
+    const [err] = await errEvt;
+    assert.match((err as Error).message, /9999/);
+    // Socket should be destroyed.
+    await new Promise<void>((resolve) => {
+      if (h!.alarm.destroyed) return resolve();
+      h!.alarm.once('close', () => resolve());
+    });
+    assert.equal(h!.alarm.destroyed, true);
+  });
+
+  it('closes connection if first frame has a non-string account', async () => {
+    const errEvt = once(h!.driver, 'error');
+    // Numeric account that numerically equals the configured account — must still be rejected.
+    h!.alarm.write('{"frame_type":"null","counter":1,"account":1234}');
+    const [err] = await errEvt;
+    assert.match((err as Error).message, /1234/);
+    await new Promise<void>((resolve) => {
+      if (h!.alarm.destroyed) return resolve();
+      h!.alarm.once('close', () => resolve());
+    });
+    assert.equal(h!.alarm.destroyed, true);
+  });
+
+  it('arm() rejects before panel is verified', async () => {
+    await assert.rejects(h!.driver.arm(1), /not yet verified/);
   });
 
   it('emits disconnected when the alarm drops', async () => {
@@ -170,7 +221,7 @@ describe('PimaDriver — receive side', () => {
 
   it('does not reverse parameter strings unless reverseStrings is enabled', async () => {
     const off = once(h!.driver, 'data');
-    h!.alarm.write('{"frame_type":"DATA","counter":82,"id":260,"start_order":1,"parameters":["abc","דלת"]}');
+    h!.alarm.write('{"frame_type":"DATA","counter":82,"account":"1234","id":260,"start_order":1,"parameters":["abc","דלת"]}');
     const [event] = await off;
     assert.deepEqual(event.parameters, ['abc', 'דלת']);
   });
@@ -199,7 +250,7 @@ describe('PimaDriver — receive side', () => {
 
 describe('PimaDriver — send side (arm/disarm)', () => {
   let h: Harness | null = null;
-  beforeEach(async () => { h = await setupConnected(); });
+  beforeEach(async () => { h = await setupVerified(); });
   afterEach(async () => { await teardown(h); h = null; });
 
   it('arm(2) sends the right OPERATION frame', async () => {
@@ -261,6 +312,24 @@ describe('PimaDriver — send side (arm/disarm)', () => {
     });
   });
 
+  it('getSystemKeyStatus(2) sends a DATA-REQ with id=2310 using partition 2 code', async () => {
+    await h!.driver.getSystemKeyStatus(2);
+    await waitForRx(h!, 1);
+    assert.deepEqual(h!.rxFromDriver[0], {
+      frame_type: 'DATA-REQ',
+      counter: 5000,
+      account: 1234,
+      password: '2222',
+      id: 2310,
+      start_order: 2,
+      stop_order: 2,
+    });
+  });
+
+  it('getSystemKeyStatus() rejects for an unconfigured partition', async () => {
+    await assert.rejects(h!.driver.getSystemKeyStatus(99), /partition 99 not configured/);
+  });
+
   it('requestData uses params.password instead of partition userCode when both are present', async () => {
     await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16, password: '9999' });
     await waitForRx(h!, 1);
@@ -288,6 +357,7 @@ describe('PimaDriver — requestData password override', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const addr = ((driver as any).server as net.Server).address() as net.AddressInfo;
     const connected = once(driver, 'connected');
+    const verified = once(driver, 'verified');
     const rxFromDriver: Array<Record<string, unknown>> = [];
     const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
     sock.on('data', (buf) => {
@@ -297,19 +367,26 @@ describe('PimaDriver — requestData password override', () => {
       }
     });
     await connected;
+    // Send a heartbeat with the matching account so the driver flips
+    // `panelVerified=true` and will accept outbound DATA-REQs.
+    sock.write('{"frame_type":"null","counter":1,"account":"5678"}');
+    await verified;
 
     await driver.requestData({ id: 260, startOrder: 1, password: 'override' });
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 1000;
       const poll = (): void => {
-        if (rxFromDriver.length >= 1) return resolve();
+        // First frame is the ACK to the heartbeat; the DATA-REQ is the second.
+        if (rxFromDriver.length >= 2) return resolve();
         if (Date.now() > deadline) return reject(new Error('timeout waiting for DATA-REQ'));
         setTimeout(poll, 5);
       };
       poll();
     });
-    assert.equal(rxFromDriver[0].password, 'override');
-    assert.equal(rxFromDriver[0].id, 260);
+    const dataReq = rxFromDriver.find((f) => f.frame_type === 'DATA-REQ');
+    assert.ok(dataReq, 'expected a DATA-REQ frame');
+    assert.equal(dataReq!.password, 'override');
+    assert.equal(dataReq!.id, 260);
 
     sock.destroy();
     await driver.stop();
@@ -354,7 +431,7 @@ describe('PimaDriver — reverseStrings option', () => {
     const sock = net.createConnection({ host: '127.0.0.1', port: addr.port });
     await connected;
     const off = once(driver, 'data');
-    sock.write('{"frame_type":"DATA","counter":1,"id":260,"start_order":1,"parameters":["abc","תלד"]}');
+    sock.write('{"frame_type":"DATA","counter":1,"account":"1234","id":260,"start_order":1,"parameters":["abc","תלד"]}');
     const [event] = await off;
     // 'abc' reversed → 'cba'; visual-order Hebrew 'תלד' (=ת,ל,ד) reversed
     // to logical-order 'דלת' (=ד,ל,ת).

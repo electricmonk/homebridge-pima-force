@@ -428,6 +428,50 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     assert.equal(siren?.type, 'Switch');
   });
 
+  it('on panel connect, queries partition state via DATA-REQ and reflects arm status', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      // The driver verifies the panel on first received frame. Send a heartbeat
+      // so verification completes and queryPartitionStates() fires.
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      await alarm.waitForRx(1); // wait for the ACK
+
+      // The platform should now send DATA-REQ (id=2310) for each configured partition.
+      const req = await alarm.waitForDataReq({ id: 2310, startOrder: 2, timeoutMs: 5000 });
+
+      // Respond: partition 2 = FullArmed (status 3) → HomeKit AWAY_ARM (1)
+      alarm.send({
+        frame_type: 'DATA',
+        counter: req.counter as number,
+        account: String(fix.account),
+        id: 2310,
+        start_order: 2,
+        parameters: ['3'],
+      });
+
+      // E2E Partition (id 2) should update to AWAY_ARM (1).
+      const acc = await waitForAccessoryState(
+        fix, 'E2E Partition', (a) => a.values.SecuritySystemCurrentState === 1,
+      );
+      assert.equal(acc.values.SecuritySystemCurrentState, 1);
+
+      // Reset to disarmed so this test doesn't affect later tests.
+      alarm.send({
+        frame_type: 'DATA',
+        counter: (req.counter as number) + 1,
+        account: String(fix.account),
+        id: 2310,
+        start_order: 2,
+        parameters: ['2'],
+      });
+      await waitForAccessoryState(
+        fix, 'E2E Partition', (a) => a.values.SecuritySystemCurrentState === 3,
+      );
+    } finally {
+      alarm.close();
+    }
+  });
+
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
     const alarm = await fix.connectAlarm();
     try {
