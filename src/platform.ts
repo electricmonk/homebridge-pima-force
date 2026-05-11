@@ -11,7 +11,6 @@ import { PartitionSecuritySystem, type PartitionAccessoryContext } from './parti
 import {
   OUTPUT_EXTERNAL_SIREN,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
-  PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
 } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
@@ -55,6 +54,12 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   encoding?: string;
   /** When true, log every frame in/out at info level (passwords redacted). */
   debug?: boolean;
+  /**
+   * Default per-request timeout in ms (DATA-REQ → DATA, OPERATION → ACK).
+   * Defaults to 5000. Lower it in tests to keep an unanswered query from
+   * stalling the wire queue for the production 5 s window.
+   */
+  requestTimeoutMs?: number;
 }
 
 type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
@@ -102,6 +107,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       account: config.account ?? 1234,
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
       encoding: (config.encoding?.trim() || undefined) ?? 'windows-1255',
+      requestTimeoutMs: config.requestTimeoutMs,
     });
 
     this.driver.on('connected', () => log.info('alarm panel connected'));
@@ -175,21 +181,6 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
-    this.driver.on('data', ({ id, startOrder, parameters, more }) => {
-      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
-      if (more) {
-        log.warn(`DATA id=2310 returned more=true (startOrder=${startOrder}, count=${parameters.length}); additional pages not fetched`);
-      }
-      for (let i = 0; i < parameters.length; i++) {
-        const partitionId = startOrder + i;
-        const status = Number(parameters[i]);
-        const acc = this.partitions.get(partitionId);
-        if (acc) {
-          log.info(`partition ${partitionId} startup state: ${status}`);
-          acc.setStateFromStartupStatus(status);
-        }
-      }
-    });
     this.driver.on('nak', ({ counter, account, reason }) => {
       // The panel rejected an OPERATION/ACK we sent. Log loudly so the user
       // can see why a command (e.g. siren mute) silently didn't take effect.
@@ -225,15 +216,24 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     const partitions = this.config.partitions ?? [];
     if (partitions.length === 0) return;
 
-    // Sequential by construction: requestData is serialized at the driver
-    // layer, so awaiting each call here is enough to satisfy the panel's
-    // one-DATA-REQ-at-a-time contract. The platform's `data` event handler
-    // updates HomeKit state from each response — we just need to wait for
-    // each query to settle before moving on.
+    // Sequential by construction: the transport serializes wire commands,
+    // so awaiting each call here is enough to satisfy the panel's one-
+    // command-at-a-time contract.
     const stale: number[] = [];
     for (const p of partitions) {
       try {
-        await this.driver.getSystemKeyStatus(p.id);
+        const res = await this.driver.getSystemKeyStatus(p.id);
+        if (res.more) {
+          this.log.warn(`DATA id=2310 returned more=true (partition=${p.id}, count=${res.parameters.length}); additional pages not fetched`);
+        }
+        // 2310 with start_order=stop_order=partitionId returns a single value:
+        // the system key status for that partition.
+        const status = Number(res.parameters[0]);
+        const acc = this.partitions.get(p.id);
+        if (acc) {
+          this.log.info(`partition ${p.id} startup state: ${status}`);
+          acc.setStateFromStartupStatus(status);
+        }
       } catch (err) {
         this.log.warn(`failed to query state for partition ${p.id}: ${(err as Error).message}`);
         stale.push(p.id);

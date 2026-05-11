@@ -171,9 +171,21 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
     ],
   };
   // Override fixes the alarmPort regardless (each setup gets a fresh port).
-  const pimaEntry = opts.pimaPlatformOverride
-    ? { ...opts.pimaPlatformOverride, platform: 'PimaForce', port: alarmPort, account }
-    : defaultPima;
+  // Force a short request timeout in tests: unanswered DATA-REQ / OPERATION
+  // responses would otherwise stall the transport's wire queue for the
+  // production-default 5 s, pushing HTTP-API-driven SET handlers past
+  // homebridge's HAP socket timeout.
+  const pimaEntry = {
+    // Shorter than production-default (5000ms) so that unanswered DATA-REQs
+    // — common in tests that don't drain the platform's startup queries —
+    // don't stall the wire queue and push HTTP SETs past homebridge's HAP
+    // socket timeout.
+    requestTimeoutMs: 150,
+    ...(opts.pimaPlatformOverride ?? defaultPima),
+    platform: 'PimaForce',
+    port: alarmPort,
+    account,
+  };
 
   const config = {
     bridge: bridgeBlock,
@@ -291,6 +303,19 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
             }
             inflightCounter = Number(frame.counter);
             dataReqs.push(frame);
+            continue;
+          }
+          // OPERATION → auto-ACK like the real panel does. We don't put OPs
+          // in `received` so frame-count assertions stay focused on inbound
+          // panel→driver traffic; tests that want to inspect OPERATIONs use
+          // `dataReqs`-style accessors if needed in the future.
+          if (frame?.frame_type === 'OPERATION') {
+            sock.write(JSON.stringify({
+              frame_type: 'ACK',
+              counter: frame.counter,
+              account: String(account),
+            }));
+            received.push(frame);
             continue;
           }
           received.push(frame);
@@ -504,14 +529,20 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
       );
       assert.equal(acc.values.SecuritySystemCurrentState, 1);
 
-      // Reset to disarmed so this test doesn't affect later tests.
+      // Reset to disarmed so this test doesn't affect later tests. The old
+      // hack — re-sending a stray DATA 2310 frame — no longer works because
+      // the transport claims every DATA via in-flight matching, so a frame
+      // with no matching request is routed to `unknown`. Use the panel-side
+      // disarm event path (CID 407 qualifier 1) instead, which the driver
+      // dispatches as a `disarm` event for the partition.
       alarm.send({
-        frame_type: 'DATA',
-        counter: (req.counter as number) + 1,
+        frame_type: 'event',
+        counter: 2,
         account: String(fix.account),
-        id: 2310,
-        start_order: 2,
-        parameters: ['2'],
+        type: 407,
+        qualifier: 1,
+        zone: 0,
+        partition: 2,
       });
       await waitForAccessoryState(
         fix, 'E2E Partition', (a) => a.values.SecuritySystemCurrentState === 3,

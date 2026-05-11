@@ -226,7 +226,7 @@ driver.on('output', ({ output, partition, active }) => {
   log(`output ${output} (partition ${partition}) → ${active ? 'ACTIVE' : 'inactive'}`);
 });
 
-driver.on('data', ({ id, startOrder, parameters, more }) => {
+function logDataResponse(id: number, startOrder: number, parameters: string[], more: boolean): void {
   // Pretty-print the responses we know about; fall back to raw JSON otherwise.
   if (id === 260) {
     // Zone names — useful for plugin config bootstrap. Skip empty slots.
@@ -244,7 +244,7 @@ driver.on('data', ({ id, startOrder, parameters, more }) => {
     return;
   }
   log(`DATA id=${id} start=${startOrder}${more ? ' (more)' : ''} parameters=${JSON.stringify(parameters)}`);
-});
+}
 
 driver.on('alarm', ({ zone, partition, active }) => {
   log(`ALARM ${active ? 'TRIGGERED' : 'restored'} partition ${partition} (zone ${zone})`);
@@ -325,7 +325,8 @@ rl.on('line', async (line) => {
         const action = rest[0];
         if (action === 'count') {
           log('>> request installed zone count');
-          await driver.getZoneCount();
+          const res = await driver.getZoneCount();
+          logDataResponse(2148, 1, res.parameters, res.more);
           return;
         }
         if (action === 'names') {
@@ -335,7 +336,8 @@ rl.on('line', async (line) => {
             return log('usage: zones names [start [stop]]; start, stop are 1-indexed zone numbers (1-144)');
           }
           log(`>> request zone names ${start}..${stop}`);
-          await driver.getZoneNames(start, stop);
+          const res = await driver.getZoneNames(start, stop);
+          logDataResponse(260, start, res.parameters, res.more);
           return;
         }
         return log('usage: zones count | zones names [start [stop]]');
@@ -356,7 +358,8 @@ rl.on('line', async (line) => {
           return log('usage: req <id> <start> [stop] [pw]  — raw DATA-REQ; pw overrides the configured user code');
         }
         log(`>> DATA-REQ id=${id} start=${start}${stop !== undefined ? ` stop=${stop}` : ''}${pw ? ` pw=***` : ''}`);
-        await driver.requestData({ id, startOrder: start, stopOrder: stop, password: pw });
+        const res = await driver.requestData({ id, startOrder: start, stopOrder: stop, password: pw });
+        logDataResponse(id, start, res.parameters, res.more);
         return;
       }
       case 'discover': {
