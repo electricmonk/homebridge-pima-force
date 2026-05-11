@@ -45,6 +45,18 @@ jobs:
 
       - run: npm ci
       - run: npm run install:homebridge
+
+      - name: Verify installed Homebridge major matches matrix
+        run: |
+          installed=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/homebridge/package.json')).version")
+          expected_major=$(printf '%s' "$HB_VERSION" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')
+          installed_major=${installed%%.*}
+          echo "Matrix HB_VERSION=$HB_VERSION → expecting major $expected_major; installed homebridge@$installed (major $installed_major)"
+          if [ "$expected_major" != "$installed_major" ]; then
+            echo "::error::installed Homebridge major ($installed_major) does not match matrix ($expected_major)"
+            exit 1
+          fi
+
       - run: npm run build
       - run: npm run test:unit
       - run: npm run test:integration
