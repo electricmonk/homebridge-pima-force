@@ -99,51 +99,11 @@ function parseZoneStatus(parameters: string[]): Map<number, ZoneStatusBits> {
   return m;
 }
 
-// Wait for a DATA event matching id+startOrder, or any NAK (which the panel
-// often emits with counter=0 for parse failures, so we can't match it precisely).
-function awaitData(id: number, startOrder: number, timeoutMs = 5000): Promise<{ parameters: string[]; more: boolean }> {
-  return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      driver.off('data', dataHandler);
-      driver.off('nak', nakHandler);
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`timeout waiting for DATA id=${id} start=${startOrder}`));
-    }, timeoutMs);
-    const dataHandler = (msg: { id: number; startOrder: number; parameters: string[]; more: boolean }): void => {
-      if (msg.id === id && msg.startOrder === startOrder) {
-        cleanup();
-        resolve({ parameters: msg.parameters, more: msg.more });
-      }
-    };
-    const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
-      cleanup();
-      reject(new Error(`NAK: ${reason} (counter=${counter ?? '?'})`));
-    };
-    driver.on('data', dataHandler);
-    driver.on('nak', nakHandler);
-  });
-}
-
-// Request a parameter and await the matching DATA response in one step.
-async function reqAndAwait(
-  id: number,
-  startOrder: number,
-  stopOrder: number | undefined,
-  password: string,
-): Promise<{ parameters: string[]; more: boolean }> {
-  const wait = awaitData(id, startOrder);
-  await driver.requestData({ id, startOrder, stopOrder, password });
-  return wait;
-}
-
 async function discover(masterCode: string): Promise<void> {
   log(`>> discover: starting`);
 
   // 1) Zone count.
-  const countRes = await reqAndAwait(2148, 1, 1, masterCode);
+  const countRes = await driver.requestData({ id: 2148, startOrder: 1, stopOrder: 1, password: masterCode });
   const zoneCount = Number(countRes.parameters[0] ?? 0);
   if (!zoneCount) throw new Error('zone count returned empty/zero');
   log(`   installed zones: ${zoneCount}`);
@@ -153,7 +113,7 @@ async function discover(masterCode: string): Promise<void> {
   let cursor = 1;
   while (cursor <= zoneCount) {
     const stop = Math.min(cursor + 15, zoneCount);
-    const res = await reqAndAwait(260, cursor, stop, masterCode);
+    const res = await driver.requestData({ id: 260, startOrder: cursor, stopOrder: stop, password: masterCode });
     res.parameters.forEach((name, i) => {
       const z = cursor + i;
       const trimmed = name.trim();
@@ -164,7 +124,7 @@ async function discover(masterCode: string): Promise<void> {
   log(`   collected ${names.size} non-empty zone names`);
 
   // 3) Enumerate partitions via 2310 (1=NotExist, 2=Disarmed, 3+=armed in some mode).
-  const keyRes = await reqAndAwait(2310, 1, 16, masterCode);
+  const keyRes = await driver.requestData({ id: 2310, startOrder: 1, stopOrder: 16, password: masterCode });
   const existing: { partition: number; armed: boolean; state: number }[] = [];
   keyRes.parameters.forEach((s, i) => {
     const state = Number(s);
@@ -183,7 +143,9 @@ async function discover(masterCode: string): Promise<void> {
     const codeLabel = partCfg ? `P${p.partition} code` : 'master code';
 
     log(`-- P${p.partition} (using ${codeLabel}) --`);
-    const before = parseZoneStatus((await reqAndAwait(2149, 1, 144, code)).parameters);
+    const before = parseZoneStatus(
+      (await driver.requestData({ id: 2149, startOrder: 1, stopOrder: 144, password: code })).parameters,
+    );
     const beforeZones = [...before.keys()].sort((a, b) => a - b);
     log(`   before: zones [${beforeZones.join(',')}] (${beforeZones.length})`);
 
@@ -208,7 +170,9 @@ async function discover(masterCode: string): Promise<void> {
     try {
       await driver.arm(p.partition, 'away');
       await sleep(500); // give the panel a beat to flip Armed bits
-      const during = parseZoneStatus((await reqAndAwait(2149, 1, 144, code)).parameters);
+      const during = parseZoneStatus(
+        (await driver.requestData({ id: 2149, startOrder: 1, stopOrder: 144, password: code })).parameters,
+      );
       const duringZones = [...during.keys()].sort((a, b) => a - b);
       log(`   armed:  zones [${duringZones.join(',')}] (${duringZones.length})`);
       duringZones.forEach((z) => zoneToPartition.set(z, p.partition));

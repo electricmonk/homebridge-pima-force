@@ -33,11 +33,20 @@ import {
 import type {
   ArmEventSource,
   ArmMode,
+  DataResponse,
   PanelFrame,
   PartitionConfig,
   PimaDriverConfig,
   PimaDriverEvents,
 } from './types.js';
+
+/**
+ * Per-request timeout for `requestData`. The real panel typically responds
+ * in well under a second on a LAN; 5s leaves headroom for slow / loaded
+ * panels while still failing fast enough that a wedged request doesn't
+ * stall serialized work for too long.
+ */
+const REQUEST_DATA_TIMEOUT_MS = 5000;
 
 const ARM_MODE_TO_OPTYPE: Record<ArmMode, number> = {
   away:    OPTYPE_ARM_AWAY,
@@ -63,6 +72,14 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   private opCounter: number;
   /** True once the panel has sent a frame with a matching account number. */
   private panelVerified = false;
+  /**
+   * Tail of the serialized DATA-REQ chain. Every requestData() call chains
+   * its actual send-and-await on top, so only one DATA-REQ is in flight at
+   * a time. The real panel rejects (NAK counter=0 "JSON frame") and/or
+   * silently drops racing DATA-REQs, so serializing here is a wire-protocol
+   * requirement, not a stylistic choice.
+   */
+  private requestQueueTail: Promise<unknown> = Promise.resolve();
 
   constructor(config: PimaDriverConfig) {
     super();
@@ -124,17 +141,41 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * the first configured partition is used to authorize.
    */
   /**
-   * Request a configuration/status parameter from the panel (DATA-REQ).
-   * The response arrives asynchronously as a `data` event (or a `nak` if
-   * the panel rejects). Authorization uses the first configured partition's
-   * user code, same as output operations.
+   * Request a configuration/status parameter from the panel (DATA-REQ) and
+   * resolve with the matching DATA frame's contents.
+   *
+   * Calls are serialized internally: a second call won't write anything to
+   * the wire until the first has settled (resolved on DATA, rejected on NAK,
+   * or timed out). This mirrors the panel's own one-request-at-a-time
+   * behaviour — issuing concurrent DATA-REQs causes the panel to NAK or
+   * drop racing requests.
+   *
+   * Authorization uses the first configured partition's user code unless
+   * `params.password` is provided.
+   *
+   * Pagination is not handled here: when `more: true`, the caller is
+   * responsible for issuing the follow-up request.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<number> {
+  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
     const part = this.config.partitions[0];
     if (!part && !params.password) {
       return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
     }
-    return new Promise((resolve, reject) => {
+    const run = (): Promise<DataResponse> => this.sendAndAwaitData(params);
+    // Chain regardless of how the previous request settled. We use `.then`
+    // with both arms so a prior rejection does NOT propagate down the chain.
+    const next: Promise<DataResponse> = this.requestQueueTail.then(run, run);
+    // Keep the chain alive across rejections by swallowing them on the tail
+    // (callers still see their own rejections via `next`).
+    this.requestQueueTail = next.catch(() => undefined);
+    return next;
+  }
+
+  private sendAndAwaitData(
+    params: { id: number; startOrder: number; stopOrder?: number; password?: string },
+  ): Promise<DataResponse> {
+    const part = this.config.partitions[0];
+    return new Promise<DataResponse>((resolve, reject) => {
       const sock = this.activeSocket;
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
@@ -142,57 +183,85 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!this.panelVerified) {
         return reject(new Error('panel identity not yet verified; retry after verified event'));
       }
+      const counter = this.opCounter++;
       const reqParams = {
         account: this.config.account,
-        counter: this.opCounter++,
+        counter,
         password: params.password ?? part!.userCode,
         id: params.id,
         startOrder: params.startOrder,
         stopOrder: params.stopOrder,
       };
+
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        this.off('data', onData);
+        this.off('nak', onNak);
+        this.off('disconnected', onDisconnected);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`timeout waiting for DATA id=${params.id} startOrder=${params.startOrder}`));
+      }, REQUEST_DATA_TIMEOUT_MS);
+      const onData = (msg: { id: number; startOrder: number; parameters: string[]; more: boolean }): void => {
+        if (msg.id !== params.id || msg.startOrder !== params.startOrder) return;
+        cleanup();
+        resolve({ parameters: msg.parameters, more: msg.more });
+      };
+      const onNak = ({ counter: nakCounter, reason }: { counter?: number; reason: string }): void => {
+        // Match by counter when present. The panel uses counter=0 for parse-
+        // level rejections ("JSON frame"); since we serialize, an in-flight
+        // counter=0 NAK is for our request. Other non-zero counters that
+        // don't match ours belong to a concurrent OPERATION (arm/disarm/
+        // siren) and must be ignored here.
+        if (nakCounter !== undefined && nakCounter !== 0 && nakCounter !== counter) return;
+        cleanup();
+        reject(new Error(`panel NAK: ${reason} (counter=${nakCounter ?? '?'})`));
+      };
+      const onDisconnected = (): void => {
+        cleanup();
+        reject(new Error('panel disconnected before DATA response'));
+      };
+      this.on('data', onData);
+      this.on('nak', onNak);
+      this.on('disconnected', onDisconnected);
+
       this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve(reqParams.counter)));
+      sock.write(buildDataReq(reqParams), (err) => {
+        if (err) {
+          cleanup();
+          reject(err);
+        }
+      });
     });
   }
 
   /** Convenience: request the panel's zone names (parameter id 260). */
-  getZoneNames(startOrder = 1, stopOrder?: number): Promise<number> {
+  getZoneNames(startOrder = 1, stopOrder?: number): Promise<DataResponse> {
     return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
   }
 
   /** Convenience: request the count of installed zones (parameter id 2148). */
-  getZoneCount(): Promise<number> {
+  getZoneCount(): Promise<DataResponse> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
   }
 
   /**
    * Query the System Key Status (parameter id 2310) for a single partition,
-   * authenticating with that partition's own user code.
-   * The response arrives as a `data` event with id=2310 and startOrder=partitionId.
+   * authenticating with that partition's own user code. Resolves with the
+   * raw DATA response — the `data` event also fires, so platform-level
+   * HomeKit state updates continue to flow through their existing handler.
    */
-  getSystemKeyStatus(partitionId: number): Promise<void> {
+  getSystemKeyStatus(partitionId: number): Promise<DataResponse> {
     const part = this.partitionByCode.get(partitionId);
     if (!part) {
       return Promise.reject(new Error(`partition ${partitionId} not configured`));
     }
-    return new Promise((resolve, reject) => {
-      const sock = this.activeSocket;
-      if (!sock || sock.destroyed) {
-        return reject(new Error('no active panel connection'));
-      }
-      if (!this.panelVerified) {
-        return reject(new Error('panel identity not yet verified; retry after verified event'));
-      }
-      const reqParams = {
-        account: this.config.account,
-        counter: this.opCounter++,
-        password: part.userCode,
-        id: PARAM_ID_SYSTEM_KEY_STATUS,
-        startOrder: partitionId,
-        stopOrder: partitionId,
-      };
-      this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+    return this.requestData({
+      id: PARAM_ID_SYSTEM_KEY_STATUS,
+      startOrder: partitionId,
+      stopOrder: partitionId,
+      password: part.userCode,
     });
   }
 

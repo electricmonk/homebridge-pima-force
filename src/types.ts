@@ -118,6 +118,12 @@ export interface DataEvent {
   more: boolean;
 }
 
+/** Resolved value from `PimaDriver.requestData` (single DATA frame). */
+export interface DataResponse {
+  parameters: string[];
+  more: boolean;
+}
+
 /**
  * Arm modes recognized by the panel (Appendix B).
  * - `away`    — Full Arm (optype 12)

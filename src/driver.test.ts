@@ -89,6 +89,31 @@ async function waitForRx(h: Harness, count: number, timeoutMs = 1000): Promise<v
   }
 }
 
+/**
+ * Echo a DATA response back for the latest DATA-REQ the driver sent. Used
+ * by tests to unblock `await driver.requestData(...)` (and its convenience
+ * wrappers), which now resolves on the matching DATA frame rather than on
+ * the write completing.
+ */
+function respondToLastDataReq(
+  h: Harness,
+  parameters: string[] = [],
+  opts: { more?: boolean } = {},
+): void {
+  const req = [...h.rxFromDriver].reverse().find((f) => f.frame_type === 'DATA-REQ');
+  if (!req) throw new Error('no DATA-REQ in rxFromDriver to respond to');
+  const reply = {
+    frame_type: 'DATA',
+    counter: req.counter,
+    account: '1234',
+    id: req.id,
+    start_order: req.start_order,
+    parameters,
+    more: opts.more ? 'yes' : 'no',
+  };
+  h.alarm.write(JSON.stringify(reply));
+}
+
 describe('PimaDriver — connection lifecycle', () => {
   let h: Harness | null = null;
   beforeEach(async () => { h = await setupConnected(); });
@@ -285,7 +310,7 @@ describe('PimaDriver — send side (arm/disarm)', () => {
   });
 
   it('getZoneNames() sends a DATA-REQ with id=260 and the right range', async () => {
-    await h!.driver.getZoneNames(1, 16);
+    const pending = h!.driver.getZoneNames(1, 16);
     await waitForRx(h!, 1);
     assert.deepEqual(h!.rxFromDriver[0], {
       frame_type: 'DATA-REQ',
@@ -296,10 +321,12 @@ describe('PimaDriver — send side (arm/disarm)', () => {
       start_order: 1,
       stop_order: 16,
     });
+    respondToLastDataReq(h!, []);
+    await pending;
   });
 
   it('getZoneCount() sends a DATA-REQ with id=2148', async () => {
-    await h!.driver.getZoneCount();
+    const pending = h!.driver.getZoneCount();
     await waitForRx(h!, 1);
     assert.deepEqual(h!.rxFromDriver[0], {
       frame_type: 'DATA-REQ',
@@ -310,10 +337,12 @@ describe('PimaDriver — send side (arm/disarm)', () => {
       start_order: 1,
       stop_order: 1,
     });
+    respondToLastDataReq(h!, ['3']);
+    await pending;
   });
 
   it('getSystemKeyStatus(2) sends a DATA-REQ with id=2310 using partition 2 code', async () => {
-    await h!.driver.getSystemKeyStatus(2);
+    const pending = h!.driver.getSystemKeyStatus(2);
     await waitForRx(h!, 1);
     assert.deepEqual(h!.rxFromDriver[0], {
       frame_type: 'DATA-REQ',
@@ -324,6 +353,8 @@ describe('PimaDriver — send side (arm/disarm)', () => {
       start_order: 2,
       stop_order: 2,
     });
+    respondToLastDataReq(h!, ['2']);
+    await pending;
   });
 
   it('getSystemKeyStatus() rejects for an unconfigured partition', async () => {
@@ -331,17 +362,75 @@ describe('PimaDriver — send side (arm/disarm)', () => {
   });
 
   it('requestData uses params.password instead of partition userCode when both are present', async () => {
-    await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16, password: '9999' });
+    const pending = h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16, password: '9999' });
     await waitForRx(h!, 1);
     assert.equal(h!.rxFromDriver[0].password, '9999');
     assert.equal(h!.rxFromDriver[0].id, 260);
+    respondToLastDataReq(h!, []);
+    await pending;
   });
 
-  it('requestData resolves with the counter used in the DATA-REQ frame', async () => {
-    const counter = await h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 1 });
+  it('requestData resolves with the DATA frame parameters', async () => {
+    const pending = h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 3 });
     await waitForRx(h!, 1);
-    assert.equal(typeof counter, 'number', 'requestData should resolve with a number');
-    assert.equal(counter, h!.rxFromDriver[0].counter, 'resolved counter should match the counter sent in the DATA-REQ');
+    respondToLastDataReq(h!, ['Front Door', 'Back Door', 'Kitchen PIR']);
+    const res = await pending;
+    assert.deepEqual(res, { parameters: ['Front Door', 'Back Door', 'Kitchen PIR'], more: false });
+  });
+
+  it('requestData propagates more:"yes" to the caller', async () => {
+    const pending = h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 16 });
+    await waitForRx(h!, 1);
+    respondToLastDataReq(h!, ['a', 'b'], { more: true });
+    const res = await pending;
+    assert.equal(res.more, true);
+    assert.deepEqual(res.parameters, ['a', 'b']);
+  });
+
+  it('serializes concurrent requestData calls (one DATA-REQ on the wire at a time)', async () => {
+    const dataReqs = (): Array<Record<string, unknown>> =>
+      h!.rxFromDriver.filter((f) => f.frame_type === 'DATA-REQ');
+    const waitForDataReqs = async (n: number, timeoutMs = 1000): Promise<void> => {
+      const deadline = Date.now() + timeoutMs;
+      while (dataReqs().length < n) {
+        if (Date.now() > deadline) {
+          throw new Error(`timeout waiting for ${n} DATA-REQ(s); got ${dataReqs().length}: ${JSON.stringify(h!.rxFromDriver)}`);
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+
+    const a = h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 1 });
+    const b = h!.driver.requestData({ id: 260, startOrder: 2, stopOrder: 2 });
+    await waitForDataReqs(1);
+    // Give the queue a chance to leak a second DATA-REQ if our serialization
+    // is broken — it shouldn't.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(dataReqs().length, 1, `expected exactly one DATA-REQ on the wire; got ${dataReqs().length}: ${JSON.stringify(h!.rxFromDriver)}`);
+
+    respondToLastDataReq(h!, ['Door A']);
+    const resA = await a;
+    assert.deepEqual(resA.parameters, ['Door A']);
+
+    await waitForDataReqs(2);
+    assert.equal(dataReqs()[1].start_order, 2);
+
+    respondToLastDataReq(h!, ['Door B']);
+    const resB = await b;
+    assert.deepEqual(resB.parameters, ['Door B']);
+  });
+
+  it('requestData rejects with a NAK that matches its counter', async () => {
+    const pending = h!.driver.requestData({ id: 260, startOrder: 1, stopOrder: 1 });
+    await waitForRx(h!, 1);
+    const req = h!.rxFromDriver[0];
+    h!.alarm.write(JSON.stringify({
+      frame_type: 'NAK',
+      counter: req.counter,
+      account: '1234',
+      data: 'invalid password',
+    }));
+    await assert.rejects(pending, /invalid password/);
   });
 });
 
@@ -372,7 +461,7 @@ describe('PimaDriver — requestData password override', () => {
     sock.write('{"frame_type":"null","counter":1,"account":"5678"}');
     await verified;
 
-    await driver.requestData({ id: 260, startOrder: 1, password: 'override' });
+    const pending = driver.requestData({ id: 260, startOrder: 1, password: 'override' });
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 1000;
       const poll = (): void => {
@@ -387,6 +476,18 @@ describe('PimaDriver — requestData password override', () => {
     assert.ok(dataReq, 'expected a DATA-REQ frame');
     assert.equal(dataReq!.password, 'override');
     assert.equal(dataReq!.id, 260);
+
+    // Unblock the pending requestData so the test (and driver) can tear down.
+    sock.write(JSON.stringify({
+      frame_type: 'DATA',
+      counter: dataReq!.counter,
+      account: '5678',
+      id: 260,
+      start_order: 1,
+      parameters: [],
+      more: 'no',
+    }));
+    await pending;
 
     sock.destroy();
     await driver.stop();

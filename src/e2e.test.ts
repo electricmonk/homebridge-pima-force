@@ -262,6 +262,12 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
     const sock = net.createConnection({ host: '127.0.0.1', port: alarmPort });
     const received: Array<Record<string, unknown>> = [];
     const dataReqs: Array<Record<string, unknown>> = [];
+    // The real panel processes one DATA-REQ at a time: if a new one arrives
+    // before we've answered the previous, it NAKs with counter=0 "JSON frame"
+    // and drops the new request. Mirror that here so tests catch racing-burst
+    // bugs (we hit one in v0.1.15 where queryPartitionStates fan-out caused
+    // the panel to drop two of three partition queries).
+    let inflightCounter: number | null = null;
     sock.on('data', (buf) => {
       // The driver may emit multiple frames per chunk under TCP coalescing.
       const text = buf.toString('utf8');
@@ -273,6 +279,17 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
           // care use waitForDataReq to await + respond. Either way, DATA-REQ
           // doesn't pollute `received` so frame-count assertions stay clean.
           if (frame?.frame_type === 'DATA-REQ') {
+            if (inflightCounter !== null) {
+              // Already have an unanswered request → reject the racing one.
+              sock.write(JSON.stringify({
+                frame_type: 'NAK',
+                counter: 0,
+                account: String(account),
+                data: 'JSON frame',
+              }));
+              continue;
+            }
+            inflightCounter = Number(frame.counter);
             dataReqs.push(frame);
             continue;
           }
@@ -282,6 +299,13 @@ async function setupE2E(opts: SetupOpts = {}): Promise<E2EFixture> {
     });
     sock.once('connect', () => {
       const send = (frame: Record<string, unknown>) => {
+        // A test-sent DATA or NAK whose counter matches the in-flight
+        // request clears the in-flight slot, so subsequent DATA-REQs from
+        // the driver are accepted instead of bouncing.
+        if ((frame.frame_type === 'DATA' || frame.frame_type === 'NAK') &&
+            inflightCounter !== null && Number(frame.counter) === inflightCounter) {
+          inflightCounter = null;
+        }
         sock.write(JSON.stringify(frame));
       };
       const waitForRx = async (n: number, timeoutMs = 2000) => {
@@ -366,6 +390,31 @@ async function waitForAccessoryState(
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   throw new Error(`timeout waiting for accessory "${name}" predicate; last state: ${JSON.stringify(last?.values)} ${lastErr ? `(last error: ${lastErr.message})` : ''}`);
+}
+
+/**
+ * Acknowledge the panel-state DATA-REQ that the platform issues for one
+ * partition on every connect (id=2310). The driver now serializes DATA-REQs,
+ * so this must be drained before zone-discovery requests appear on the wire.
+ * Returns the responded-to request frame for convenience.
+ */
+async function respondPartitionState(
+  alarm: FakeAlarm,
+  account: number,
+  partition: number,
+  status: string,
+): Promise<Record<string, unknown>> {
+  const req = await alarm.waitForDataReq({ id: 2310, startOrder: partition, timeoutMs: 5000 });
+  alarm.send({
+    frame_type: 'DATA',
+    counter: req.counter,
+    account: String(account),
+    id: 2310,
+    start_order: partition,
+    parameters: [status],
+    more: 'no',
+  });
+  return req;
 }
 
 /** Wait until all named accessories appear in the UI's list. */
@@ -1240,6 +1289,10 @@ describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () =>
       // kicking off discovery.
       alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
 
+      // Drain the partition-state query that the platform issues before
+      // anything else (the driver serializes DATA-REQs at the wire level).
+      await respondPartitionState(alarm, fix.account, 1, '2');
+
       // 1) Plugin queries installed zone count (param 2148).
       const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
         throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
@@ -1319,6 +1372,8 @@ describe('E2E: zone auto-discovery — paginated zone names', { timeout: 30_000 
     const alarm = await fix.connectAlarm();
     try {
       alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+
+      await respondPartitionState(alarm, fix.account, 1, '2');
 
       // Zone count: 4 zones total.
       const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
@@ -1403,6 +1458,8 @@ describe('E2E: zone auto-discovery — NAK counter correlation', { timeout: 30_0
     try {
       alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
 
+      await respondPartitionState(alarm, fix.account, 1, '2');
+
       // Plugin sends a DATA-REQ for zone count.
       const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
         throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
@@ -1442,6 +1499,79 @@ describe('E2E: zone auto-discovery — NAK counter correlation', { timeout: 30_0
       });
 
       await waitForAccessories(fix, ['Porch Sensor', 'Back Door']);
+    } finally {
+      alarm.close();
+    }
+  });
+});
+
+/**
+ * Regression: with multiple partitions configured, the platform must query each
+ * partition's state one-at-a-time. The real panel only accepts a single
+ * DATA-REQ in flight at once and NAKs/drops the rest. v0.1.15 fanned out 3
+ * concurrent DATA-REQs and only partition 1's state ever arrived.
+ */
+describe('E2E: partition state query serialization', { timeout: 30_000 }, () => {
+  const threePartitionConfig = {
+    name: 'Pima Serialization',
+    siren: { enabled: false },
+    partitions: [
+      { id: 1, name: 'Part One',   userCode: '1111' },
+      { id: 2, name: 'Part Two',   userCode: '2222' },
+      { id: 3, name: 'Part Three', userCode: '3333' },
+    ],
+    zones: [{ zone: 1, name: 'Serialization Zone', type: 'contact' }],
+  };
+
+  let fix: E2EFixture;
+  before(async () => {
+    fix = await setupE2E({ pimaPlatformOverride: threePartitionConfig });
+    await waitForAccessories(fix, ['Part One', 'Part Two', 'Part Three']);
+  });
+  after(async () => { await fix?.stop(); });
+
+  it('issues 2310 DATA-REQs one at a time and updates every partition', async () => {
+    const alarm = await fix.connectAlarm();
+    try {
+      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      await alarm.waitForRx(1); // wait for our ACK to the heartbeat
+
+      // Pima status → HomeKit SecuritySystemCurrentState: 3=FullArmed→AWAY_ARM(1),
+      // 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
+      const partitionStatuses: Array<{ partition: number; status: string; homeKitState: number }> = [
+        { partition: 1, status: '3', homeKitState: 1 },
+        { partition: 2, status: '4', homeKitState: 0 },
+        { partition: 3, status: '5', homeKitState: 2 },
+      ];
+
+      for (const { partition, status } of partitionStatuses) {
+        const req = await alarm.waitForDataReq({ id: 2310, startOrder: partition, timeoutMs: 5000 })
+          .catch((err) => {
+            throw new Error(`partition ${partition} 2310 DATA-REQ never arrived (panel NAK'd a racing request?): ${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
+          });
+        alarm.send({
+          frame_type: 'DATA',
+          counter: req.counter,
+          account: String(fix.account),
+          id: 2310,
+          start_order: partition,
+          parameters: [status],
+          more: 'no',
+        });
+      }
+
+      const accessoryNameByPartition: Record<number, string> = {
+        1: 'Part One',
+        2: 'Part Two',
+        3: 'Part Three',
+      };
+      for (const { partition, homeKitState } of partitionStatuses) {
+        await waitForAccessoryState(
+          fix,
+          accessoryNameByPartition[partition],
+          (a) => a.values.SecuritySystemCurrentState === homeKitState,
+        );
+      }
     } finally {
       alarm.close();
     }
