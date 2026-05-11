@@ -212,8 +212,8 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     });
   }
 
-  configureAccessory(accessory: PlatformAccessory<AnyContext>): void {
-    this.cachedAccessories.set(accessory.UUID, accessory);
+  configureAccessory(accessory: PlatformAccessory): void {
+    this.cachedAccessories.set(accessory.UUID, accessory as PlatformAccessory<AnyContext>);
   }
 
   private queryPartitionStates(): void {
