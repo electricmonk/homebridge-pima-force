@@ -8,7 +8,12 @@ import type {
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
-import { OUTPUT_EXTERNAL_SIREN, PARAM_ID_NUMBER_OF_INSTALLED_ZONES, PARAM_ID_ZONE_NAMES } from './protocol.js';
+import {
+  OUTPUT_EXTERNAL_SIREN,
+  PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_SYSTEM_KEY_STATUS,
+  PARAM_ID_ZONE_NAMES,
+} from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
@@ -87,6 +92,12 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       log.warn('No partitions configured; plugin will register no accessories. Open the plugin settings to add partitions and zones.');
     }
 
+    const partitionIds = partitions.map((p) => p.id);
+    const duplicateIds = partitionIds.filter((id, i) => partitionIds.indexOf(id) !== i);
+    if (duplicateIds.length > 0) {
+      log.warn(`Config has duplicate partition IDs: ${[...new Set(duplicateIds)].join(', ')} — remove duplicates from plugin settings`);
+    }
+
     this.driver = new PimaDriver({
       port: config.port ?? 7780,
       account: config.account ?? 1234,
@@ -95,16 +106,20 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     });
 
     this.driver.on('connected', () => log.info('alarm panel connected'));
-    this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
-    // Trigger zone discovery on the first frame we receive from the panel,
-    // not on raw TCP `connected`. Real panels start emitting `null`
-    // heartbeats immediately; transient probes (a port check that connects
-    // and immediately destroys the socket) never send a frame and so won't
-    // race the discovery against a closing socket.
-    this.driver.on('frameIn', () => {
-      if (this.autoDiscoveryAttempted) return;
-      void this.maybeDiscoverNewZones();
+    // `verified` fires after the panel sends its first frame with the
+    // expected account number. We use it (rather than raw `connected` or
+    // `frameIn`) for any DATA-REQ-emitting work because `requestData`
+    // rejects until `panelVerified=true`. It also avoids racing transient
+    // port probes that connect and immediately destroy the socket without
+    // ever sending a frame.
+    this.driver.on('verified', () => {
+      log.debug('panel identity verified — querying partition states');
+      this.queryPartitionStates();
+      if (!this.autoDiscoveryAttempted) {
+        void this.maybeDiscoverNewZones();
+      }
     });
+    this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
 
     this.driver.on('arm', ({ partition, source }) => {
@@ -155,6 +170,21 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
+    this.driver.on('data', ({ id, startOrder, parameters, more }) => {
+      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
+      if (more) {
+        log.warn(`DATA id=2310 returned more=true (startOrder=${startOrder}, count=${parameters.length}); additional pages not fetched`);
+      }
+      for (let i = 0; i < parameters.length; i++) {
+        const partitionId = startOrder + i;
+        const status = Number(parameters[i]);
+        const acc = this.partitions.get(partitionId);
+        if (acc) {
+          log.info(`partition ${partitionId} startup state: ${status}`);
+          acc.setStateFromStartupStatus(status);
+        }
+      }
+    });
     this.driver.on('nak', ({ counter, account, reason }) => {
       // The panel rejected an OPERATION/ACK we sent. Log loudly so the user
       // can see why a command (e.g. siren mute) silently didn't take effect.
@@ -184,6 +214,47 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
   configureAccessory(accessory: PlatformAccessory): void {
     this.cachedAccessories.set(accessory.UUID, accessory as PlatformAccessory<AnyContext>);
+  }
+
+  private queryPartitionStates(): void {
+    const partitions = this.config.partitions ?? [];
+    if (partitions.length === 0) return;
+
+    const pending = new Set(partitions.map((p) => p.id));
+
+    const tid = setTimeout(() => {
+      this.driver.off('data', listener);
+      if (pending.size > 0) {
+        this.log.warn(
+          `startup state query timed out for partition(s) ${[...pending].join(', ')} — HomeKit state may be stale until next reconnect`,
+        );
+      }
+    }, 10_000);
+    tid.unref();
+
+    const listener = ({ id, startOrder, parameters }: { id: number; startOrder: number; parameters: string[]; more: boolean }) => {
+      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
+      for (let i = 0; i < parameters.length; i++) {
+        pending.delete(startOrder + i);
+      }
+      if (pending.size === 0) {
+        clearTimeout(tid);
+        this.driver.off('data', listener);
+      }
+    };
+
+    this.driver.on('data', listener);
+
+    for (const p of partitions) {
+      this.driver.getSystemKeyStatus(p.id).catch((err: Error) => {
+        this.log.warn(`failed to query state for partition ${p.id}: ${err.message}`);
+        pending.delete(p.id);
+        if (pending.size === 0) {
+          clearTimeout(tid);
+          this.driver.off('data', listener);
+        }
+      });
+    }
   }
 
   private noteUnknownPartition(id: number, what: string): void {

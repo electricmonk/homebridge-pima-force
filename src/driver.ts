@@ -23,6 +23,7 @@ import {
   OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
   parseFrames,
   QUALIFIER_NEW,
@@ -60,6 +61,8 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   private server: net.Server | null = null;
   private activeSocket: net.Socket | null = null;
   private opCounter: number;
+  /** True once the panel has sent a frame with a matching account number. */
+  private panelVerified = false;
 
   constructor(config: PimaDriverConfig) {
     super();
@@ -136,6 +139,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
       }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
+      }
       const reqParams = {
         account: this.config.account,
         counter: this.opCounter++,
@@ -159,6 +165,37 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
   }
 
+  /**
+   * Query the System Key Status (parameter id 2310) for a single partition,
+   * authenticating with that partition's own user code.
+   * The response arrives as a `data` event with id=2310 and startOrder=partitionId.
+   */
+  getSystemKeyStatus(partitionId: number): Promise<void> {
+    const part = this.partitionByCode.get(partitionId);
+    if (!part) {
+      return Promise.reject(new Error(`partition ${partitionId} not configured`));
+    }
+    return new Promise((resolve, reject) => {
+      const sock = this.activeSocket;
+      if (!sock || sock.destroyed) {
+        return reject(new Error('no active panel connection'));
+      }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
+      }
+      const reqParams = {
+        account: this.config.account,
+        counter: this.opCounter++,
+        password: part.userCode,
+        id: PARAM_ID_SYSTEM_KEY_STATUS,
+        startOrder: partitionId,
+        stopOrder: partitionId,
+      };
+      this.emit('frameOut', dataReqFrame(reqParams));
+      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
   setOutput(output: number, active: boolean): Promise<void> {
     const part = this.config.partitions[0];
     if (!part) {
@@ -168,6 +205,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       const sock = this.activeSocket;
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
+      }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
       }
       const params = {
         account: this.config.account,
@@ -187,6 +227,9 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       const sock = this.activeSocket;
       if (!sock || sock.destroyed) {
         return reject(new Error('no active panel connection'));
+      }
+      if (!this.panelVerified) {
+        return reject(new Error('panel identity not yet verified; retry after verified event'));
       }
       const part = this.partitionByCode.get(partition);
       if (!part) {
@@ -211,6 +254,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       this.activeSocket.destroy();
     }
     this.activeSocket = sock;
+    this.panelVerified = false;
     this.emit('connected');
 
     sock.on('data', (buf) => this.handleData(sock, buf));
@@ -230,6 +274,27 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     // been observed in practice on a LAN with the panel.
     for (const frame of parseFrames(buf, this.config.encoding)) {
       this.emit('frameIn', frame as unknown as Record<string, unknown>);
+
+      // Verify the connecting client is our panel by checking its account number
+      // on the first frame. Reject and close if it doesn't match — prevents a
+      // rogue TCP client from triggering DATA-REQ frames that carry user codes.
+      if (!this.panelVerified) {
+        const rawAccount = frame.account;
+        const accountOk =
+          typeof rawAccount === 'string' &&
+          /^\d+$/.test(rawAccount) &&
+          Number(rawAccount) === this.config.account;
+        if (!accountOk) {
+          this.emit('error', new Error(
+            `rejected connection: account=${frame.account} does not match expected ${this.config.account}`,
+          ));
+          sock.destroy();
+          return;
+        }
+        this.panelVerified = true;
+        this.emit('verified');
+      }
+
       if (shouldAck(frame)) {
         const ack = ackFrame(frame);
         this.emit('frameOut', ack);

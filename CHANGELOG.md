@@ -1,3 +1,14 @@
+## [0.1.14](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.13...v0.1.14) (2026-05-11)
+
+### Features
+
+* query partition state on panel connect (issue [#16](https://github.com/electricmonk/homebridge-pima-force/issues/16)) ([63b6f1b](https://github.com/electricmonk/homebridge-pima-force/commit/63b6f1b3f1222eba4180bc6831f7b97456ce7a2b))
+
+### Bug Fixes
+
+* address baz review comments on partition state query ([bfc0a02](https://github.com/electricmonk/homebridge-pima-force/commit/bfc0a02deab507fb960ca522fc5d3aa15a4dcbe7))
+* address remaining baz comments — credential write gating and startup timeout ([d419b09](https://github.com/electricmonk/homebridge-pima-force/commit/d419b09badf77325460b644839d7c6690a1526e6))
+
 ## [0.1.13](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.12...v0.1.13) (2026-05-10)
 
 ### Bug Fixes
