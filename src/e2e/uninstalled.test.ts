@@ -28,8 +28,11 @@ describe('E2E: freshly installed plugin with no partitions configured', { timeou
   after(async () => { await harness?.stop(); });
 
   it('driver does not start — alarm port remains unbound', async () => {
-    // Poll for 5 s to give discoverDevices() time to run. Fail fast if the port
-    // ever becomes bound; pass once the window closes without a connection.
+    // This is a "must NOT happen for a duration" assertion — the inverse
+    // of `eventually()`, which polls until success. Here we poll until
+    // failure or until the window closes; success means the predicate
+    // never failed during the window. The setTimeout below is the poll
+    // interval, not a "wait then check" sleep.
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const bound = await new Promise<boolean>((resolve) => {

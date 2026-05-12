@@ -152,19 +152,22 @@ describe('E2E: panel → UI events', { timeout: 60_000 }, () => {
     await alarm.report(zoneOpened({ zone: unknownZone, partition: partition.id }));
     await alarm.report(zoneClosed({ zone: unknownZone, partition: partition.id }));
 
-    // Give the subprocess a moment to receive + log.
-    await new Promise((r) => setTimeout(r, 300));
+    // Logs contain at least one INFO line for the unconfigured zone. Once
+    // the log line appears, the platform has fully processed the event —
+    // any side effects (like an erroneous accessory registration) would
+    // already have happened.
+    await eventually(() => {
+      const infoLines = harness.logs().split('\n').filter(
+        (l) => l.includes('unconfigured zone') && l.includes(String(unknownZone)),
+      );
+      assert.ok(
+        infoLines.filter((l) => !l.includes('debug')).length >= 1,
+        `expected at least one info-level log mentioning unconfigured zone ${unknownZone}, got:\n${infoLines.join('\n')}`,
+      );
+    });
 
     // No new accessories were registered.
     assert.equal((await harness.homebridge.listAccessories()).length, accessoriesBefore);
-
-    // Logs contain at least one INFO line for the unconfigured zone.
-    const logs = harness.logs();
-    const infoLines = logs.split('\n').filter((l) => l.includes('unconfigured zone') && l.includes(String(unknownZone)));
-    assert.ok(
-      infoLines.filter((l) => !l.includes('debug')).length >= 1,
-      `expected at least one info-level log mentioning unconfigured zone ${unknownZone}, got:\n${infoLines.join('\n')}`,
-    );
   });
 
   it('arm event for unconfigured partition is logged at INFO and does not crash', async () => {
@@ -172,17 +175,20 @@ describe('E2E: panel → UI events', { timeout: 60_000 }, () => {
     const unknownPartition = 7;
     await alarm.report(armedFromRemote({ partition: unknownPartition }));
 
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the platform to have logged the unconfigured partition.
+    // Until that log line appears, we don't yet know the platform has
+    // observed and acted on (or ignored) the event.
+    await eventually(() => {
+      const logs = harness.logs();
+      assert.ok(
+        logs.includes(`unconfigured partition ${unknownPartition}`),
+        `expected log to mention unconfigured partition ${unknownPartition}, got tail:\n${logs.split('\n').slice(-30).join('\n')}`,
+      );
+    });
 
     // Existing partition accessory is unaffected.
     const acc = await harness.homebridge.findAccessory(partition.name);
     assert.notEqual(acc, undefined);
-
-    const logs = harness.logs();
-    assert.ok(
-      logs.includes(`unconfigured partition ${unknownPartition}`),
-      `expected log to mention unconfigured partition ${unknownPartition}, got tail:\n${logs.split('\n').slice(-30).join('\n')}`,
-    );
   });
 
   it('valid event still works after an unconfigured one', async () => {

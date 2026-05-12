@@ -131,15 +131,17 @@ describe('E2E: UI → panel commands', { timeout: 60_000 }, () => {
     const opsBefore = alarm.operations.length;
     await siren.setOn(true);
 
-    // Wait briefly; assert NO output OPERATION arrived.
-    await new Promise((r) => setTimeout(r, 500));
+    // The siren SET handler accepts ON (so HAP returns 200), then ~50 ms
+    // later snaps the value back via updateCharacteristic. Wait for the
+    // snap-back as the deterministic signal that the handler has fully
+    // run; once the switch is OFF again, no further OPERATION can be
+    // pending from this SET.
+    await eventually(async () => assert.equal(await siren.on(), false));
+
     const opAfter = alarm.operations.slice(opsBefore).find(
       (o) => o.optype === OPTYPE_ACTIVATE_OUTPUT || o.optype === OPTYPE_DEACTIVATE_OUTPUT,
     );
     assert.equal(opAfter, undefined, `no output OPERATION should be sent on manual activation; got: ${JSON.stringify(opAfter)}`);
-
-    // And the switch should be back to OFF.
-    assert.equal(await siren.on(), false);
   });
 
   it('partition with restricted arm modes advertises only DISARM and AWAY as valid targets', async () => {
@@ -160,10 +162,13 @@ describe('E2E: UI → panel commands', { timeout: 60_000 }, () => {
     using alarm = await harness.connectAlarm();
     const restricted = harness.homebridge.partition(partition2.name);
     const opsBefore = alarm.operations.length;
-    // STAY is disabled. HAP / platform defense-in-depth should reject the SET.
+    // STAY is disabled. The platform's defense-in-depth check throws
+    // HapStatusError synchronously, *before* reaching driver.arm(); HAP
+    // returns 4xx and the awaited PUT rejects. By the time the catch
+    // returns, the SET handler has fully unwound — no OPERATION can be
+    // pending.
     await restricted.setTarget(STAY_ARM).catch(() => { /* expected error */ });
 
-    await new Promise((r) => setTimeout(r, 300));
     const op = alarm.operations.slice(opsBefore).find(
       (o) => o.optype === OPTYPE_ARM_HOME1 || o.optype === OPTYPE_ARM_HOME2,
     );
