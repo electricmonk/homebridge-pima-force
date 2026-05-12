@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { describe, it } from 'node:test';
 import { PimaDriver } from './driver.js';
 import { anAlarmSystem, type AlarmSystem } from './test-support/alarm-system.js';
+import { consistently } from './test-support/consistently.js';
 import { eventually } from './test-support/eventually.js';
 import {
   EVENT_TYPE_ZONE,
@@ -144,9 +145,7 @@ describe('PimaDriver — receive side', () => {
     await using driver = await setupDriver();
     using alarm = await connectAlarm(driver, { verify: false });
     alarm.sendRaw({ frame_type: 'NAK', counter: 0, account: '1234', data: 'JSON frame' });
-    // Give it a moment to NOT respond.
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(alarm.received.length, 0);
+    await consistently(() => assert.equal(alarm.received.length, 0), { durationMs: 50 });
   });
 
   it('emits zone active=true when zone opens', async () => {
