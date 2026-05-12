@@ -21,11 +21,45 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { anAlarmSystem, type AlarmSystem } from './test-support/alarm-system.js';
+import { eventually } from './test-support/eventually.js';
+import {
+  PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
+  PARAM_ID_SYSTEM_KEY_STATUS,
+  PARAM_ID_ZONE_NAMES,
+  PARTITION_DISARMED,
+} from './test-support/constants.js';
+import {
+  nakWithReason,
+  partitionStatus,
+  zoneCount,
+  zoneNames,
+} from './test-support/frames.js';
+import { homeBridge, type HomeBridge } from './test-support/homebridge.js';
 
 const ROOT = process.cwd();
 const HB_SERVICE_BIN = join(ROOT, 'node_modules/homebridge-config-ui-x/dist/bin/hb-service.js');
 const STARTUP_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 50;
+
+/**
+ * Open an `alarmSystem` connection to the fixture's alarm port and, by
+ * default, complete the verification handshake.
+ */
+async function connectAlarmSystem(
+  fix: E2EFixture,
+  opts: { verify?: boolean } = {},
+): Promise<AlarmSystem> {
+  const alarm = anAlarmSystem({ port: fix.alarmPort, account: fix.account });
+  await alarm.connect();
+  if (opts.verify !== false) await alarm.verify();
+  return alarm;
+}
+
+/** Build a `homeBridge` driver from the e2e fixture's UI port and auth token. */
+function homeBridgeFor(fix: E2EFixture): HomeBridge {
+  return homeBridge({ baseUrl: `http://127.0.0.1:${fix.uiPort}`, token: fix.token });
+}
 
 async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -1222,13 +1256,20 @@ describe('E2E: legacy nested config migration', { timeout: 90_000 }, () => {
   let storagePath: string;
   let firstBootUuids: Map<string, string>;
 
+  const expectedAccessories = ['Legacy Partition', 'Legacy Door', 'Legacy Siren'];
+
   before(async () => {
     // Boot 1: install with legacy nested config. Plugin migrates in-memory
     // and registers accessories with the new flat-shape UUID convention.
     fix = await setupE2E({ pimaPlatformOverride: legacyPima, keepStorage: true });
     storagePath = fix.storage;
-    await waitForAccessories(fix, ['Legacy Partition', 'Legacy Door', 'Legacy Siren']);
-    const list = await listAccessories(fix);
+    const hb = homeBridgeFor(fix);
+    const list = await eventually(async () => {
+      const accs = await hb.listAccessories();
+      const names = new Set(accs.map((a) => a.serviceName));
+      for (const n of expectedAccessories) assert.ok(names.has(n), `accessory "${n}" not yet registered; saw ${[...names].join(', ')}`);
+      return accs;
+    }, { timeoutMs: 15_000 });
     firstBootUuids = new Map(list.map((a) => [a.serviceName, a.uniqueId]));
     await fix.stop();
   });
@@ -1261,15 +1302,17 @@ describe('E2E: legacy nested config migration', { timeout: 90_000 }, () => {
       keepStorage: true,
     });
     try {
-      await waitForAccessories(fix, ['Legacy Partition', 'Legacy Door', 'Legacy Siren']);
-      const list = await listAccessories(fix);
-      const second = new Map(list.map((a) => [a.serviceName, a.uniqueId]));
+      const hb = homeBridgeFor(fix);
+      const list = await eventually(async () => {
+        const accs = await hb.listAccessories();
+        const names = new Set(accs.map((a) => a.serviceName));
+        for (const n of expectedAccessories) assert.ok(names.has(n));
+        return accs;
+      }, { timeoutMs: 15_000 });
 
-      for (const name of ['Legacy Partition', 'Legacy Door', 'Legacy Siren']) {
-        const before = firstBootUuids.get(name);
-        const after = second.get(name);
-        assert.ok(after, `"${name}" missing after restart`);
-        assert.equal(after, before, `"${name}" uniqueId changed across restart (was ${before}, now ${after})`);
+      const second = new Map(list.map((a) => [a.serviceName, a.uniqueId]));
+      for (const name of expectedAccessories) {
+        assert.equal(second.get(name), firstBootUuids.get(name), `"${name}" uniqueId changed across restart`);
       }
 
       const log = readFileSync(join(storagePath, 'homebridge.log'), 'utf8');
@@ -1307,58 +1350,48 @@ describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () =>
     fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
     // The partition accessory is wired up at didFinishLaunching, before the
     // panel ever connects. Zones aren't expected yet.
-    await waitForAccessories(fix, ['Discovery Partition']);
+    const hb = homeBridgeFor(fix);
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      assert.ok(names.has('Discovery Partition'));
+    }, { timeoutMs: 15_000 });
   });
   after(async () => { await fix?.stop(); });
 
   it('queries the panel and registers each discovered zone as a HomeKit sensor', async () => {
-    const alarm = await fix.connectAlarm();
+    const alarm = await connectAlarmSystem(fix, { verify: false });
+    const hb = homeBridgeFor(fix);
     try {
-      // Send a heartbeat first — real panels emit one immediately on
-      // connect, and the plugin uses the first incoming frame as its
-      // signal that the connection is real (vs. a port-up probe) before
-      // kicking off discovery.
-      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      // Real panels emit a heartbeat immediately on connect; the plugin uses
+      // the first incoming frame as its signal that the connection is real
+      // (vs. a port-up probe) before kicking off discovery.
+      await alarm.verify();
 
       // Drain the partition-state query that the platform issues before
-      // anything else (the driver serializes DATA-REQs at the wire level).
-      await respondPartitionState(alarm, fix.account, 1, '2');
+      // anything else (the transport serializes DATA-REQs).
+      const stateQuery = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+      alarm.respond(stateQuery, partitionStatus({ status: PARTITION_DISARMED }));
 
-      // 1) Plugin queries installed zone count (param 2148).
-      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
-        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
-      });
-      assert.equal(countReq.start_order, 1, `zone-count DATA-REQ should start_order=1; got ${JSON.stringify(countReq)}`);
-      alarm.send({
-        frame_type: 'DATA',
-        counter: countReq.counter,
-        account: String(fix.account),
-        id: 2148,
-        start_order: 1,
-        parameters: ['3'],
-        more: 'no',
-      });
+      // 1) Plugin queries installed zone count.
+      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
+      assert.equal(countQ.start_order, 1);
+      alarm.respond(countQ, zoneCount({ count: 3 }));
 
-      // 2) Plugin queries zone names (param 260) — paginated, but 3 zones
-      //    fits in one page so we expect a single DATA-REQ for 1..3.
-      const namesReq = await alarm.waitForDataReq({ id: 260 });
-      assert.equal(namesReq.start_order, 1, `zone-names DATA-REQ should start at 1; got ${JSON.stringify(namesReq)}`);
-      alarm.send({
-        frame_type: 'DATA',
-        counter: namesReq.counter,
-        account: String(fix.account),
-        id: 260,
-        start_order: 1,
-        parameters: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
-        more: 'no',
-      });
+      // 2) Plugin queries zone names — 3 zones fits in one page.
+      const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
+      alarm.respond(namesQ, zoneNames({ names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'] }));
 
       // 3) Plugin should register each zone in-process — they appear in the
       //    UI without a Homebridge restart.
-      await waitForAccessories(fix, ['Front Door', 'Living Room PIR', 'Kitchen Smoke']);
+      await eventually(async () => {
+        const accs = await hb.listAccessories();
+        const names = new Set(accs.map((a) => a.serviceName));
+        for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke']) {
+          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
+        }
+      }, { timeoutMs: 15_000 });
 
-      // 4) And persist them into config.json so a future restart still
-      //    sees them.
+      // 4) And persist them into config.json so a future restart still sees them.
       const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
       const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
       const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
@@ -1366,13 +1399,11 @@ describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () =>
         | undefined;
       assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
       const zones = myEntry!.zones ?? [];
+      assert.equal(zones.length, 3);
       const byZone = new Map(zones.map((z) => [z.zone, z]));
-      assert.equal(zones.length, 3, `expected 3 zones written to config.json; got ${zones.length}: ${JSON.stringify(zones)}`);
       assert.equal(byZone.get(1)?.name, 'Front Door');
       assert.equal(byZone.get(2)?.name, 'Living Room PIR');
       assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
-      // Default type for newly-discovered zones is contact; user customizes
-      // afterwards via the UI.
       for (const z of zones) {
         assert.equal(z.type, 'contact', `zone ${z.zone} should default to contact; got ${z.type}`);
       }
@@ -1395,58 +1426,41 @@ describe('E2E: zone auto-discovery — paginated zone names', { timeout: 30_000 
 
   before(async () => {
     fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
-    await waitForAccessories(fix, ['Discovery Partition']);
+    const hb = homeBridgeFor(fix);
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      assert.ok(names.has('Discovery Partition'));
+    }, { timeoutMs: 15_000 });
   });
   after(async () => { await fix?.stop(); });
 
   it('aggregates zone names split across multiple DATA frames (more: yes)', async () => {
-    const alarm = await fix.connectAlarm();
+    const alarm = await connectAlarmSystem(fix);
+    const hb = homeBridgeFor(fix);
     try {
-      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+      alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
 
-      await respondPartitionState(alarm, fix.account, 1, '2');
+      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
+      alarm.respond(countQ, zoneCount({ count: 4 }));
 
-      // Zone count: 4 zones total.
-      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
-        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
-      });
-      alarm.send({
-        frame_type: 'DATA',
-        counter: countReq.counter,
-        account: String(fix.account),
-        id: 2148,
-        start_order: 1,
-        parameters: ['4'],
-        more: 'no',
-      });
+      // First page: zones 1–3, panel says more is coming.
+      const page1 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
+      alarm.respond(page1, zoneNames({
+        names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
+        more: true,
+      }));
 
-      // First page of names: zones 1–3, panel says more is coming.
-      const namesReq1 = await alarm.waitForDataReq({ id: 260, startOrder: 1 });
-      assert.equal(namesReq1.start_order, 1, `first page should start at 1; got ${JSON.stringify(namesReq1)}`);
-      alarm.send({
-        frame_type: 'DATA',
-        counter: namesReq1.counter,
-        account: String(fix.account),
-        id: 260,
-        start_order: 1,
-        parameters: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
-        more: 'yes',
-      });
+      // Second page: zone 4 only, no more.
+      const page2 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 4 });
+      alarm.respond(page2, zoneNames({ names: ['Garage Motion'] }));
 
-      // Second page: zone 4, no more.
-      const namesReq2 = await alarm.waitForDataReq({ id: 260, startOrder: 4 });
-      assert.equal(namesReq2.start_order, 4, `second page should start at 4; got ${JSON.stringify(namesReq2)}`);
-      alarm.send({
-        frame_type: 'DATA',
-        counter: namesReq2.counter,
-        account: String(fix.account),
-        id: 260,
-        start_order: 4,
-        parameters: ['Garage Motion'],
-        more: 'no',
-      });
-
-      await waitForAccessories(fix, ['Front Door', 'Living Room PIR', 'Kitchen Smoke', 'Garage Motion']);
+      await eventually(async () => {
+        const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+        for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke', 'Garage Motion']) {
+          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
+        }
+      }, { timeoutMs: 15_000 });
 
       const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
       const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
@@ -1456,7 +1470,7 @@ describe('E2E: zone auto-discovery — paginated zone names', { timeout: 30_000 
       assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
       const zones = myEntry!.zones ?? [];
       const byZone = new Map(zones.map((z) => [z.zone, z]));
-      assert.equal(zones.length, 4, `expected 4 zones written to config.json; got ${zones.length}: ${JSON.stringify(zones)}`);
+      assert.equal(zones.length, 4);
       assert.equal(byZone.get(1)?.name, 'Front Door');
       assert.equal(byZone.get(2)?.name, 'Living Room PIR');
       assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
@@ -1480,56 +1494,45 @@ describe('E2E: zone auto-discovery — NAK counter correlation', { timeout: 30_0
 
   before(async () => {
     fix = await setupE2E({ pimaPlatformOverride: partitionOnlyConfig });
-    await waitForAccessories(fix, ['Discovery Partition']);
+    const hb = homeBridgeFor(fix);
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      assert.ok(names.has('Discovery Partition'));
+    }, { timeoutMs: 15_000 });
   });
   after(async () => { await fix?.stop(); });
 
   it('ignores an unrelated NAK (different counter) during discovery', async () => {
-    const alarm = await fix.connectAlarm();
+    const alarm = await connectAlarmSystem(fix);
+    const hb = homeBridgeFor(fix);
     try {
-      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
+      const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+      alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
 
-      await respondPartitionState(alarm, fix.account, 1, '2');
-
-      // Plugin sends a DATA-REQ for zone count.
-      const countReq = await alarm.waitForDataReq({ id: 2148 }).catch((err) => {
-        throw new Error(`${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
-      });
+      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
 
       // Simulate the panel NAKing some *other* command with a different counter.
-      const unrelatedCounter = (countReq.counter as number) + 99;
-      alarm.send({
+      // The plugin's discovery loop should ignore it and keep waiting on its
+      // own DATA-REQ.
+      alarm.sendRaw({
         frame_type: 'NAK',
-        counter: unrelatedCounter,
+        counter: Number(countQ.counter) + 99,
         account: String(fix.account),
-        data: 'invalid password',
+        data: nakWithReason('invalid password').data,
       });
 
       // Discovery should still proceed — respond with the real zone count DATA.
-      alarm.send({
-        frame_type: 'DATA',
-        counter: countReq.counter,
-        account: String(fix.account),
-        id: 2148,
-        start_order: 1,
-        parameters: ['2'],
-        more: 'no',
-      });
+      alarm.respond(countQ, zoneCount({ count: 2 }));
 
-      const namesReq = await alarm.waitForDataReq({ id: 260 }).catch((err) => {
-        throw new Error(`discovery was incorrectly aborted by unrelated NAK: ${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
-      });
-      alarm.send({
-        frame_type: 'DATA',
-        counter: namesReq.counter,
-        account: String(fix.account),
-        id: 260,
-        start_order: 1,
-        parameters: ['Porch Sensor', 'Back Door'],
-        more: 'no',
-      });
+      const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES });
+      alarm.respond(namesQ, zoneNames({ names: ['Porch Sensor', 'Back Door'] }));
 
-      await waitForAccessories(fix, ['Porch Sensor', 'Back Door']);
+      await eventually(async () => {
+        const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+        for (const n of ['Porch Sensor', 'Back Door']) {
+          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
+        }
+      }, { timeoutMs: 15_000 });
     } finally {
       alarm.close();
     }
@@ -1557,51 +1560,36 @@ describe('E2E: partition state query serialization', { timeout: 30_000 }, () => 
   let fix: E2EFixture;
   before(async () => {
     fix = await setupE2E({ pimaPlatformOverride: threePartitionConfig });
-    await waitForAccessories(fix, ['Part One', 'Part Two', 'Part Three']);
+    const hb = homeBridgeFor(fix);
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      for (const n of ['Part One', 'Part Two', 'Part Three']) assert.ok(names.has(n));
+    }, { timeoutMs: 15_000 });
   });
   after(async () => { await fix?.stop(); });
 
   it('issues 2310 DATA-REQs one at a time and updates every partition', async () => {
-    const alarm = await fix.connectAlarm();
+    const alarm = await connectAlarmSystem(fix);
+    const hb = homeBridgeFor(fix);
     try {
-      alarm.send({ frame_type: 'null', counter: 1, account: String(fix.account) });
-      await alarm.waitForRx(1); // wait for our ACK to the heartbeat
-
-      // Pima status → HomeKit SecuritySystemCurrentState: 3=FullArmed→AWAY_ARM(1),
-      // 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
-      const partitionStatuses: Array<{ partition: number; status: string; homeKitState: number }> = [
-        { partition: 1, status: '3', homeKitState: 1 },
-        { partition: 2, status: '4', homeKitState: 0 },
-        { partition: 3, status: '5', homeKitState: 2 },
+      // Pima system-key status → HomeKit current state:
+      //   3=FullArmed→AWAY_ARM(1), 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
+      const expected = [
+        { partition: 1, accessoryName: 'Part One',   pimaStatus: 3, homekitState: 1 },
+        { partition: 2, accessoryName: 'Part Two',   pimaStatus: 4, homekitState: 0 },
+        { partition: 3, accessoryName: 'Part Three', pimaStatus: 5, homekitState: 2 },
       ];
 
-      for (const { partition, status } of partitionStatuses) {
-        const req = await alarm.waitForDataReq({ id: 2310, startOrder: partition, timeoutMs: 5000 })
-          .catch((err) => {
-            throw new Error(`partition ${partition} 2310 DATA-REQ never arrived (panel NAK'd a racing request?): ${(err as Error).message}\n--- homebridge log ---\n${fix.logs()}`);
-          });
-        alarm.send({
-          frame_type: 'DATA',
-          counter: req.counter,
-          account: String(fix.account),
-          id: 2310,
-          start_order: partition,
-          parameters: [status],
-          more: 'no',
-        });
+      for (const { partition, pimaStatus } of expected) {
+        const q = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition });
+        alarm.respond(q, partitionStatus({ status: pimaStatus }));
       }
 
-      const accessoryNameByPartition: Record<number, string> = {
-        1: 'Part One',
-        2: 'Part Two',
-        3: 'Part Three',
-      };
-      for (const { partition, homeKitState } of partitionStatuses) {
-        await waitForAccessoryState(
-          fix,
-          accessoryNameByPartition[partition],
-          (a) => a.values.SecuritySystemCurrentState === homeKitState,
-        );
+      for (const { accessoryName, homekitState } of expected) {
+        await eventually(async () => assert.equal(
+          await hb.partition(accessoryName).currentState(),
+          homekitState,
+        ));
       }
     } finally {
       alarm.close();
