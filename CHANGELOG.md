@@ -1,3 +1,5 @@
+## [0.1.19](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.18...v0.1.19) (2026-05-12)
+
 ## [0.1.18](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.17...v0.1.18) (2026-05-12)
 
 ## [0.1.17](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.16...v0.1.17) (2026-05-12)
