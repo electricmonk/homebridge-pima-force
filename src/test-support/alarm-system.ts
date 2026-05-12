@@ -54,7 +54,7 @@ export interface AlarmSystemOptions {
   reportCounterStart?: number;
 }
 
-export interface AlarmSystem {
+export interface AlarmSystem extends Disposable {
   connect(): Promise<void>;
   close(): void;
   /** Send a `null` heartbeat with the matching account, flipping the driver's `panelVerified` flag. */
@@ -284,5 +284,6 @@ export function anAlarmSystem(opts: AlarmSystemOptions): AlarmSystem {
     autoAck,
     autoReject,
     sendRaw,
+    [Symbol.dispose]: close,
   };
 }

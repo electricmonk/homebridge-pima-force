@@ -366,174 +366,130 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
   });
 
   it('on panel connect, queries partition state via DATA-REQ and reflects arm status', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      // Respond to the startup partition-state query: partition 2 = FullArmed
-      // (HomeKit AWAY_ARM).
-      const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 2 });
-      alarm.respond(stateQ, partitionStatus({ status: PARTITION_FULL_ARMED }));
+    // Respond to the startup partition-state query: partition 2 = FullArmed
+    // (HomeKit AWAY_ARM).
+    const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 2 });
+    alarm.respond(stateQ, partitionStatus({ status: PARTITION_FULL_ARMED }));
 
-      await eventually(async () => assert.equal(
-        await hb.partition('E2E Partition').currentState(), AWAY_ARM,
-      ));
+    await eventually(async () => assert.equal(
+      await hb.partition('E2E Partition').currentState(), AWAY_ARM,
+    ));
 
-      // Reset to disarmed so this test doesn't affect later tests. A stray
-      // DATA frame won't work — the transport claims every DATA via in-flight
-      // matching — so use the panel-side disarm event path (CID 407 q=1)
-      // instead, which the driver dispatches as a `disarm` event.
-      await alarm.report(disarmedFromRemote({ partition: 2 }));
-      await eventually(async () => assert.equal(
-        await hb.partition('E2E Partition').currentState(), DISARMED,
-      ));
-    } finally {
-      alarm.close();
-    }
+    // Reset to disarmed so this test doesn't affect later tests. A stray
+    // DATA frame won't work — the transport claims every DATA via in-flight
+    // matching — so use the panel-side disarm event path (CID 407 q=1)
+    // instead, which the driver dispatches as a `disarm` event.
+    await alarm.report(disarmedFromRemote({ partition: 2 }));
+    await eventually(async () => assert.equal(
+      await hb.partition('E2E Partition').currentState(), DISARMED,
+    ));
   });
 
   it('zone OPEN event flips ContactSensor to detected (Open) in UI', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      await alarm.report(zoneOpened({ zone: 4, partition: 2 }));
-      await eventually(async () => assert.equal(
-        await hb.zone('E2E Door').state(), CONTACT_NOT_DETECTED,
-      ));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(zoneOpened({ zone: 4, partition: 2 }));
+    await eventually(async () => assert.equal(
+      await hb.zone('E2E Door').state(), CONTACT_NOT_DETECTED,
+    ));
   });
 
   it('zone RESTORE event flips ContactSensor back to closed', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      await alarm.report(zoneClosed({ zone: 4, partition: 2 }));
-      await eventually(async () => assert.equal(
-        await hb.zone('E2E Door').state(), CONTACT_DETECTED,
-      ));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(zoneClosed({ zone: 4, partition: 2 }));
+    await eventually(async () => assert.equal(
+      await hb.zone('E2E Door').state(), CONTACT_DETECTED,
+    ));
   });
 
   it('panel ARM event flips SecuritySystem CurrentState to AWAY_ARM', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      // External arm event with no prior target → defaults to AWAY_ARM.
-      await alarm.report(armedFromRemote({ partition: 2, user: 2 }));
-      await eventually(async () => assert.equal(
-        await hb.partition('E2E Partition').currentState(), AWAY_ARM,
-      ));
-    } finally {
-      alarm.close();
-    }
+    // External arm event with no prior target → defaults to AWAY_ARM.
+    await alarm.report(armedFromRemote({ partition: 2, user: 2 }));
+    await eventually(async () => assert.equal(
+      await hb.partition('E2E Partition').currentState(), AWAY_ARM,
+    ));
   });
 
   it('UI SecuritySystem AWAY target sends an AWAY-arm OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const partition = homeBridgeFor(fix).partition('E2E Partition');
-    try {
-      // Force DISARM first so the AWAY transition is a real SET (SET handler
-      // short-circuits when value already matches).
-      await partition.setTarget(DISARMED);
-      await partition.setTarget(AWAY_ARM);
+    // Force DISARM first so the AWAY transition is a real SET (SET handler
+    // short-circuits when value already matches).
+    await partition.setTarget(DISARMED);
+    await partition.setTarget(AWAY_ARM);
 
-      const op = await alarm.nextOperation({ optype: OPTYPE_ARM_AWAY, partition: 2 });
-      assert.equal(op.partition, 2);
-    } finally {
-      alarm.close();
-    }
+    const op = await alarm.nextOperation({ optype: OPTYPE_ARM_AWAY, partition: 2 });
+    assert.equal(op.partition, 2);
   });
 
   it('UI SecuritySystem STAY target sends a Home1 OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const partition = homeBridgeFor(fix).partition('E2E Partition');
-    try {
-      await partition.setTarget(DISARMED);
-      await partition.setTarget(STAY_ARM);
+    await partition.setTarget(DISARMED);
+    await partition.setTarget(STAY_ARM);
 
-      const op = await alarm.nextOperation({ optype: OPTYPE_ARM_HOME1, partition: 2 });
-      assert.equal(op.partition, 2);
-    } finally {
-      alarm.close();
-    }
+    const op = await alarm.nextOperation({ optype: OPTYPE_ARM_HOME1, partition: 2 });
+    assert.equal(op.partition, 2);
   });
 
   it('UI SecuritySystem NIGHT target sends a Home2 OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const partition = homeBridgeFor(fix).partition('E2E Partition');
-    try {
-      await partition.setTarget(DISARMED);
-      await partition.setTarget(NIGHT_ARM);
+    await partition.setTarget(DISARMED);
+    await partition.setTarget(NIGHT_ARM);
 
-      await alarm.nextOperation({ optype: OPTYPE_ARM_HOME2, partition: 2 });
-    } finally {
-      alarm.close();
-    }
+    await alarm.nextOperation({ optype: OPTYPE_ARM_HOME2, partition: 2 });
   });
 
   it('burglary alarm event flips SecuritySystem CurrentState to ALARM_TRIGGERED', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      await alarm.report(burglaryAlarm({ zone: 4, partition: 2 }));
-      await eventually(async () => assert.equal(
-        await hb.partition('E2E Partition').currentState(), ALARM_TRIGGERED,
-      ));
+    await alarm.report(burglaryAlarm({ zone: 4, partition: 2 }));
+    await eventually(async () => assert.equal(
+      await hb.partition('E2E Partition').currentState(), ALARM_TRIGGERED,
+    ));
 
-      // Restore: alarm clears, current state leaves ALARM_TRIGGERED.
-      await alarm.report(alarmRestored({ zone: 4, partition: 2 }));
-      await eventually(async () => assert.notEqual(
-        await hb.partition('E2E Partition').currentState(), ALARM_TRIGGERED,
-      ));
-    } finally {
-      alarm.close();
-    }
+    // Restore: alarm clears, current state leaves ALARM_TRIGGERED.
+    await alarm.report(alarmRestored({ zone: 4, partition: 2 }));
+    await eventually(async () => assert.notEqual(
+      await hb.partition('E2E Partition').currentState(), ALARM_TRIGGERED,
+    ));
   });
 
   it('siren ON event flips Switch On to true', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const siren = homeBridgeFor(fix).siren('E2E Siren');
-    try {
-      await alarm.report(sirenActivated({ partition: 1 }));
-      await eventually(async () => assert.equal(await siren.on(), true));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(sirenActivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), true));
   });
 
   it('siren OFF event flips Switch On to false', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const siren = homeBridgeFor(fix).siren('E2E Siren');
-    try {
-      await alarm.report(sirenActivated({ partition: 1 }));
-      await eventually(async () => assert.equal(await siren.on(), true));
+    await alarm.report(sirenActivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), true));
 
-      await alarm.report(sirenDeactivated({ partition: 1 }));
-      await eventually(async () => assert.equal(await siren.on(), false));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(sirenDeactivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), false));
   });
 
   it('toggling Switch OFF (while sounding) sends de-activate output OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const siren = homeBridgeFor(fix).siren('E2E Siren');
-    try {
-      // First make the siren "sounding" so toggling OFF has work to do.
-      await alarm.report(sirenActivated({ partition: 1 }));
-      await eventually(async () => assert.equal(await siren.on(), true));
+    // First make the siren "sounding" so toggling OFF has work to do.
+    await alarm.report(sirenActivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), true));
 
-      await siren.setOn(false);
+    await siren.setOn(false);
 
-      const op = await alarm.nextOperation({ optype: OPTYPE_DEACTIVATE_OUTPUT });
-      assert.equal(op.order, 1, 'external siren output number');
-      assert.equal(op.partition, 0, 'panel-wide partition');
-    } finally {
-      alarm.close();
-    }
+    const op = await alarm.nextOperation({ optype: OPTYPE_DEACTIVATE_OUTPUT });
+    assert.equal(op.order, 1, 'external siren output number');
+    assert.equal(op.partition, 0, 'panel-wide partition');
   });
 
   it('toggling Switch OFF still sends de-activate even when we never saw a 770 q=1', async () => {
@@ -541,156 +497,124 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
     // `target === this.active`. If the panel sounded the siren without
     // emitting type=770 (or we missed it), `this.active` stayed false and
     // tapping OFF in the Home app silently sent nothing.
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const siren = homeBridgeFor(fix).siren('E2E Siren');
-    try {
-      // Deliberately no `sirenActivated` event — simulates the panel
-      // sounding without us ever seeing the 770 q=1.
-      assert.equal(await siren.on(), false, 'precondition: switch is OFF');
+    // Deliberately no `sirenActivated` event — simulates the panel
+    // sounding without us ever seeing the 770 q=1.
+    assert.equal(await siren.on(), false, 'precondition: switch is OFF');
 
-      await siren.setOn(false);
-      const op = await alarm.nextOperation({ optype: OPTYPE_DEACTIVATE_OUTPUT });
-      assert.equal(op.order, 1);
-    } finally {
-      alarm.close();
-    }
+    await siren.setOn(false);
+    const op = await alarm.nextOperation({ optype: OPTYPE_DEACTIVATE_OUTPUT });
+    assert.equal(op.order, 1);
   });
 
   it('toggling Switch ON (manual activation) is rejected — no OPERATION sent', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
     const siren = hb.siren('E2E Siren');
-    try {
-      // Ensure siren is OFF first.
-      await alarm.report(sirenDeactivated({ partition: 1 }));
-      await eventually(async () => assert.equal(await siren.on(), false));
+    // Ensure siren is OFF first.
+    await alarm.report(sirenDeactivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), false));
 
-      const opsBefore = alarm.operations.length;
-      await siren.setOn(true);
+    const opsBefore = alarm.operations.length;
+    await siren.setOn(true);
 
-      // Wait briefly; assert NO output OPERATION arrived.
-      await new Promise((r) => setTimeout(r, 500));
-      const opAfter = alarm.operations.slice(opsBefore).find(
-        (o) => o.optype === OPTYPE_ACTIVATE_OUTPUT || o.optype === OPTYPE_DEACTIVATE_OUTPUT,
-      );
-      assert.equal(opAfter, undefined, `no output OPERATION should be sent on manual activation; got: ${JSON.stringify(opAfter)}`);
+    // Wait briefly; assert NO output OPERATION arrived.
+    await new Promise((r) => setTimeout(r, 500));
+    const opAfter = alarm.operations.slice(opsBefore).find(
+      (o) => o.optype === OPTYPE_ACTIVATE_OUTPUT || o.optype === OPTYPE_DEACTIVATE_OUTPUT,
+    );
+    assert.equal(opAfter, undefined, `no output OPERATION should be sent on manual activation; got: ${JSON.stringify(opAfter)}`);
 
-      // And the switch should be back to OFF.
-      assert.equal(await siren.on(), false);
-    } finally {
-      alarm.close();
-    }
+    // And the switch should be back to OFF.
+    assert.equal(await siren.on(), false);
   });
 
   it('zone event for unconfigured zone is logged once at INFO and does not crash', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      const accessoriesBefore = (await hb.listAccessories()).length;
+    const accessoriesBefore = (await hb.listAccessories()).length;
 
-      // Zone 99 is not in our config. Send twice — the second open/close pair
-      // should NOT generate a second INFO log.
-      await alarm.report(zoneOpened({ zone: 99, partition: 2 }));
-      await alarm.report(zoneClosed({ zone: 99, partition: 2 }));
+    // Zone 99 is not in our config. Send twice — the second open/close pair
+    // should NOT generate a second INFO log.
+    await alarm.report(zoneOpened({ zone: 99, partition: 2 }));
+    await alarm.report(zoneClosed({ zone: 99, partition: 2 }));
 
-      // Give the subprocess a moment to receive + log.
-      await new Promise((r) => setTimeout(r, 300));
+    // Give the subprocess a moment to receive + log.
+    await new Promise((r) => setTimeout(r, 300));
 
-      // No new accessories were registered.
-      assert.equal((await hb.listAccessories()).length, accessoriesBefore);
+    // No new accessories were registered.
+    assert.equal((await hb.listAccessories()).length, accessoriesBefore);
 
-      // Logs contain at least one INFO line for unconfigured zone 99.
-      const logs = fix.logs();
-      const infoLines = logs.split('\n').filter((l) => l.includes('unconfigured zone') && l.includes('99'));
-      assert.ok(
-        infoLines.filter((l) => !l.includes('debug')).length >= 1,
-        `expected at least one info-level log mentioning unconfigured zone 99, got:\n${infoLines.join('\n')}`,
-      );
-    } finally {
-      alarm.close();
-    }
+    // Logs contain at least one INFO line for unconfigured zone 99.
+    const logs = fix.logs();
+    const infoLines = logs.split('\n').filter((l) => l.includes('unconfigured zone') && l.includes('99'));
+    assert.ok(
+      infoLines.filter((l) => !l.includes('debug')).length >= 1,
+      `expected at least one info-level log mentioning unconfigured zone 99, got:\n${infoLines.join('\n')}`,
+    );
   });
 
   it('arm event for unconfigured partition is logged at INFO and does not crash', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      // Partition 7 is not in our config.
-      await alarm.report(armedFromRemote({ partition: 7 }));
+    // Partition 7 is not in our config.
+    await alarm.report(armedFromRemote({ partition: 7 }));
 
-      await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300));
 
-      // Existing partition 2 accessory is unaffected.
-      const acc = await hb.findAccessory('E2E Partition');
-      assert.notEqual(acc, undefined);
+    // Existing partition 2 accessory is unaffected.
+    const acc = await hb.findAccessory('E2E Partition');
+    assert.notEqual(acc, undefined);
 
-      const logs = fix.logs();
-      assert.ok(
-        logs.includes('unconfigured partition 7'),
-        `expected log to mention unconfigured partition 7, got tail:\n${logs.split('\n').slice(-30).join('\n')}`,
-      );
-    } finally {
-      alarm.close();
-    }
+    const logs = fix.logs();
+    assert.ok(
+      logs.includes('unconfigured partition 7'),
+      `expected log to mention unconfigured partition 7, got tail:\n${logs.split('\n').slice(-30).join('\n')}`,
+    );
   });
 
   it('valid event still works after an unconfigured one', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const motion = homeBridgeFor(fix).zone('E2E Motion');
-    try {
-      // Unknown zone first (should be ignored gracefully).
-      await alarm.report(zoneOpened({ zone: 88, partition: 2 }));
-      // Then a valid event on configured zone 3 (motion sensor).
-      await alarm.report(zoneOpened({ zone: 3, partition: 2 }));
+    // Unknown zone first (should be ignored gracefully).
+    await alarm.report(zoneOpened({ zone: 88, partition: 2 }));
+    // Then a valid event on configured zone 3 (motion sensor).
+    await alarm.report(zoneOpened({ zone: 3, partition: 2 }));
 
-      // HAP serialises MotionDetected as 1/0, not true/false.
-      await eventually(async () => assert.equal(await motion.state(), 1));
-    } finally {
-      alarm.close();
-    }
+    // HAP serialises MotionDetected as 1/0, not true/false.
+    await eventually(async () => assert.equal(await motion.state(), 1));
   });
 
   it('motion zone event flips MotionDetected true/false', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const motion = homeBridgeFor(fix).zone('E2E Motion');
-    try {
-      await alarm.report(zoneOpened({ zone: 3, partition: 2 }));
-      await eventually(async () => assert.equal(await motion.state(), 1));
+    await alarm.report(zoneOpened({ zone: 3, partition: 2 }));
+    await eventually(async () => assert.equal(await motion.state(), 1));
 
-      await alarm.report(zoneClosed({ zone: 3, partition: 2 }));
-      await eventually(async () => assert.equal(await motion.state(), 0));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(zoneClosed({ zone: 3, partition: 2 }));
+    await eventually(async () => assert.equal(await motion.state(), 0));
   });
 
   it('leak zone event flips LeakDetected', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const leak = homeBridgeFor(fix).zone('E2E Leak');
-    try {
-      await alarm.report(zoneOpened({ zone: 5, partition: 2 }));
-      // LeakDetected: 1 = LEAK_DETECTED, 0 = LEAK_NOT_DETECTED
-      await eventually(async () => assert.equal(await leak.state(), 1));
+    await alarm.report(zoneOpened({ zone: 5, partition: 2 }));
+    // LeakDetected: 1 = LEAK_DETECTED, 0 = LEAK_NOT_DETECTED
+    await eventually(async () => assert.equal(await leak.state(), 1));
 
-      await alarm.report(zoneClosed({ zone: 5, partition: 2 }));
-      await eventually(async () => assert.equal(await leak.state(), 0));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(zoneClosed({ zone: 5, partition: 2 }));
+    await eventually(async () => assert.equal(await leak.state(), 0));
   });
 
   it('smoke zone event flips SmokeDetected', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const smoke = homeBridgeFor(fix).zone('E2E Smoke');
-    try {
-      await alarm.report(zoneOpened({ zone: 6, partition: 2 }));
-      await eventually(async () => assert.equal(await smoke.state(), 1));
+    await alarm.report(zoneOpened({ zone: 6, partition: 2 }));
+    await eventually(async () => assert.equal(await smoke.state(), 1));
 
-      await alarm.report(zoneClosed({ zone: 6, partition: 2 }));
-      await eventually(async () => assert.equal(await smoke.state(), 0));
-    } finally {
-      alarm.close();
-    }
+    await alarm.report(zoneClosed({ zone: 6, partition: 2 }));
+    await eventually(async () => assert.equal(await smoke.state(), 0));
   });
 
   it('restricted partition advertises only DISARM and AWAY as valid targets', async () => {
@@ -708,51 +632,39 @@ describe('E2E: TCP ↔ UI', { timeout: 60_000 }, () => {
   });
 
   it('disabled mode SET on restricted partition does not send an arm OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const restricted = homeBridgeFor(fix).partition('E2E Restricted');
-    try {
-      const opsBefore = alarm.operations.length;
-      // STAY is disabled. HAP / platform defense-in-depth should reject the SET.
-      await restricted.setTarget(STAY_ARM).catch(() => { /* expected error */ });
+    const opsBefore = alarm.operations.length;
+    // STAY is disabled. HAP / platform defense-in-depth should reject the SET.
+    await restricted.setTarget(STAY_ARM).catch(() => { /* expected error */ });
 
-      await new Promise((r) => setTimeout(r, 300));
-      const op = alarm.operations.slice(opsBefore).find(
-        (o) => o.optype === OPTYPE_ARM_HOME1 || o.optype === OPTYPE_ARM_HOME2,
-      );
-      assert.equal(op, undefined, `disabled mode should not send Home1/Home2; got: ${JSON.stringify(op)}`);
-    } finally {
-      alarm.close();
-    }
+    await new Promise((r) => setTimeout(r, 300));
+    const op = alarm.operations.slice(opsBefore).find(
+      (o) => o.optype === OPTYPE_ARM_HOME1 || o.optype === OPTYPE_ARM_HOME2,
+    );
+    assert.equal(op, undefined, `disabled mode should not send Home1/Home2; got: ${JSON.stringify(op)}`);
   });
 
   it('enabled mode SET on restricted partition still works (AWAY arm)', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const restricted = homeBridgeFor(fix).partition('E2E Restricted');
-    try {
-      // Force DISARM first so the AWAY transition fires SET.
-      await restricted.setTarget(DISARMED);
-      await restricted.setTarget(AWAY_ARM);
+    // Force DISARM first so the AWAY transition fires SET.
+    await restricted.setTarget(DISARMED);
+    await restricted.setTarget(AWAY_ARM);
 
-      const op = await alarm.nextOperation({ optype: OPTYPE_ARM_AWAY, partition: 3 });
-      assert.equal(op.partition, 3);
-    } finally {
-      alarm.close();
-    }
+    const op = await alarm.nextOperation({ optype: OPTYPE_ARM_AWAY, partition: 3 });
+    assert.equal(op.partition, 3);
   });
 
   it('UI SecuritySystem DISARM target sends disarm OPERATION', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const partition = homeBridgeFor(fix).partition('E2E Partition');
-    try {
-      // Force AWAY_ARM first so the DISARM transition actually triggers a SET.
-      await partition.setTarget(AWAY_ARM);
-      await partition.setTarget(DISARMED);
+    // Force AWAY_ARM first so the DISARM transition actually triggers a SET.
+    await partition.setTarget(AWAY_ARM);
+    await partition.setTarget(DISARMED);
 
-      const op = await alarm.nextOperation({ optype: OPTYPE_DISARM, partition: 2 });
-      assert.equal(op.partition, 2);
-    } finally {
-      alarm.close();
-    }
+    const op = await alarm.nextOperation({ optype: OPTYPE_DISARM, partition: 2 });
+    assert.equal(op.partition, 2);
   });
 });
 
@@ -887,56 +799,52 @@ describe('E2E: zone auto-discovery on first connect', { timeout: 30_000 }, () =>
   after(async () => { await fix?.stop(); });
 
   it('queries the panel and registers each discovered zone as a HomeKit sensor', async () => {
-    const alarm = await connectAlarmSystem(fix, { verify: false });
+    using alarm = await connectAlarmSystem(fix, { verify: false });
     const hb = homeBridgeFor(fix);
-    try {
-      // Real panels emit a heartbeat immediately on connect; the plugin uses
-      // the first incoming frame as its signal that the connection is real
-      // (vs. a port-up probe) before kicking off discovery.
-      await alarm.verify();
+    // Real panels emit a heartbeat immediately on connect; the plugin uses
+    // the first incoming frame as its signal that the connection is real
+    // (vs. a port-up probe) before kicking off discovery.
+    await alarm.verify();
 
-      // Drain the partition-state query that the platform issues before
-      // anything else (the transport serializes DATA-REQs).
-      const stateQuery = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
-      alarm.respond(stateQuery, partitionStatus({ status: PARTITION_DISARMED }));
+    // Drain the partition-state query that the platform issues before
+    // anything else (the transport serializes DATA-REQs).
+    const stateQuery = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+    alarm.respond(stateQuery, partitionStatus({ status: PARTITION_DISARMED }));
 
-      // 1) Plugin queries installed zone count.
-      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
-      assert.equal(countQ.start_order, 1);
-      alarm.respond(countQ, zoneCount({ count: 3 }));
+    // 1) Plugin queries installed zone count.
+    const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
+    assert.equal(countQ.start_order, 1);
+    alarm.respond(countQ, zoneCount({ count: 3 }));
 
-      // 2) Plugin queries zone names — 3 zones fits in one page.
-      const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
-      alarm.respond(namesQ, zoneNames({ names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'] }));
+    // 2) Plugin queries zone names — 3 zones fits in one page.
+    const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
+    alarm.respond(namesQ, zoneNames({ names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'] }));
 
-      // 3) Plugin should register each zone in-process — they appear in the
-      //    UI without a Homebridge restart.
-      await eventually(async () => {
-        const accs = await hb.listAccessories();
-        const names = new Set(accs.map((a) => a.serviceName));
-        for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke']) {
-          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
-        }
-      }, { timeoutMs: 15_000 });
-
-      // 4) And persist them into config.json so a future restart still sees them.
-      const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
-      const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
-      const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
-        | { zones?: Array<{ zone: number; name: string; type: string }> }
-        | undefined;
-      assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
-      const zones = myEntry!.zones ?? [];
-      assert.equal(zones.length, 3);
-      const byZone = new Map(zones.map((z) => [z.zone, z]));
-      assert.equal(byZone.get(1)?.name, 'Front Door');
-      assert.equal(byZone.get(2)?.name, 'Living Room PIR');
-      assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
-      for (const z of zones) {
-        assert.equal(z.type, 'contact', `zone ${z.zone} should default to contact; got ${z.type}`);
+    // 3) Plugin should register each zone in-process — they appear in the
+    //    UI without a Homebridge restart.
+    await eventually(async () => {
+      const accs = await hb.listAccessories();
+      const names = new Set(accs.map((a) => a.serviceName));
+      for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke']) {
+        assert.ok(names.has(n), `accessory "${n}" not yet registered`);
       }
-    } finally {
-      alarm.close();
+    }, { timeoutMs: 15_000 });
+
+    // 4) And persist them into config.json so a future restart still sees them.
+    const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
+    const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
+    const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
+      | { zones?: Array<{ zone: number; name: string; type: string }> }
+      | undefined;
+    assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
+    const zones = myEntry!.zones ?? [];
+    assert.equal(zones.length, 3);
+    const byZone = new Map(zones.map((z) => [z.zone, z]));
+    assert.equal(byZone.get(1)?.name, 'Front Door');
+    assert.equal(byZone.get(2)?.name, 'Living Room PIR');
+    assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
+    for (const z of zones) {
+      assert.equal(z.type, 'contact', `zone ${z.zone} should default to contact; got ${z.type}`);
     }
   });
 });
@@ -963,49 +871,45 @@ describe('E2E: zone auto-discovery — paginated zone names', { timeout: 30_000 
   after(async () => { await fix?.stop(); });
 
   it('aggregates zone names split across multiple DATA frames (more: yes)', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
-      alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
+    const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+    alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
 
-      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
-      alarm.respond(countQ, zoneCount({ count: 4 }));
+    const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
+    alarm.respond(countQ, zoneCount({ count: 4 }));
 
-      // First page: zones 1–3, panel says more is coming.
-      const page1 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
-      alarm.respond(page1, zoneNames({
-        names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
-        more: true,
-      }));
+    // First page: zones 1–3, panel says more is coming.
+    const page1 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 1 });
+    alarm.respond(page1, zoneNames({
+      names: ['Front Door', 'Living Room PIR', 'Kitchen Smoke'],
+      more: true,
+    }));
 
-      // Second page: zone 4 only, no more.
-      const page2 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 4 });
-      alarm.respond(page2, zoneNames({ names: ['Garage Motion'] }));
+    // Second page: zone 4 only, no more.
+    const page2 = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES, startOrder: 4 });
+    alarm.respond(page2, zoneNames({ names: ['Garage Motion'] }));
 
-      await eventually(async () => {
-        const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
-        for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke', 'Garage Motion']) {
-          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
-        }
-      }, { timeoutMs: 15_000 });
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      for (const n of ['Front Door', 'Living Room PIR', 'Kitchen Smoke', 'Garage Motion']) {
+        assert.ok(names.has(n), `accessory "${n}" not yet registered`);
+      }
+    }, { timeoutMs: 15_000 });
 
-      const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
-      const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
-      const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
-        | { zones?: Array<{ zone: number; name: string; type: string }> }
-        | undefined;
-      assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
-      const zones = myEntry!.zones ?? [];
-      const byZone = new Map(zones.map((z) => [z.zone, z]));
-      assert.equal(zones.length, 4);
-      assert.equal(byZone.get(1)?.name, 'Front Door');
-      assert.equal(byZone.get(2)?.name, 'Living Room PIR');
-      assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
-      assert.equal(byZone.get(4)?.name, 'Garage Motion');
-    } finally {
-      alarm.close();
-    }
+    const configText = readFileSync(join(fix.storage, 'config.json'), 'utf8');
+    const cfg = JSON.parse(configText) as { platforms: Array<Record<string, unknown>> };
+    const myEntry = cfg.platforms.find((p) => p.platform === 'PimaForce') as
+      | { zones?: Array<{ zone: number; name: string; type: string }> }
+      | undefined;
+    assert.ok(myEntry, 'PimaForce platform entry missing from config.json');
+    const zones = myEntry!.zones ?? [];
+    const byZone = new Map(zones.map((z) => [z.zone, z]));
+    assert.equal(zones.length, 4);
+    assert.equal(byZone.get(1)?.name, 'Front Door');
+    assert.equal(byZone.get(2)?.name, 'Living Room PIR');
+    assert.equal(byZone.get(3)?.name, 'Kitchen Smoke');
+    assert.equal(byZone.get(4)?.name, 'Garage Motion');
   });
 });
 
@@ -1031,39 +935,35 @@ describe('E2E: zone auto-discovery — NAK counter correlation', { timeout: 30_0
   after(async () => { await fix?.stop(); });
 
   it('ignores an unrelated NAK (different counter) during discovery', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
-      alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
+    const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 1 });
+    alarm.respond(stateQ, partitionStatus({ status: PARTITION_DISARMED }));
 
-      const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
+    const countQ = await alarm.nextQuery({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES });
 
-      // Simulate the panel NAKing some *other* command with a different counter.
-      // The plugin's discovery loop should ignore it and keep waiting on its
-      // own DATA-REQ.
-      alarm.sendRaw({
-        frame_type: 'NAK',
-        counter: Number(countQ.counter) + 99,
-        account: String(fix.account),
-        data: nakWithReason('invalid password').data,
-      });
+    // Simulate the panel NAKing some *other* command with a different counter.
+    // The plugin's discovery loop should ignore it and keep waiting on its
+    // own DATA-REQ.
+    alarm.sendRaw({
+      frame_type: 'NAK',
+      counter: Number(countQ.counter) + 99,
+      account: String(fix.account),
+      data: nakWithReason('invalid password').data,
+    });
 
-      // Discovery should still proceed — respond with the real zone count DATA.
-      alarm.respond(countQ, zoneCount({ count: 2 }));
+    // Discovery should still proceed — respond with the real zone count DATA.
+    alarm.respond(countQ, zoneCount({ count: 2 }));
 
-      const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES });
-      alarm.respond(namesQ, zoneNames({ names: ['Porch Sensor', 'Back Door'] }));
+    const namesQ = await alarm.nextQuery({ id: PARAM_ID_ZONE_NAMES });
+    alarm.respond(namesQ, zoneNames({ names: ['Porch Sensor', 'Back Door'] }));
 
-      await eventually(async () => {
-        const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
-        for (const n of ['Porch Sensor', 'Back Door']) {
-          assert.ok(names.has(n), `accessory "${n}" not yet registered`);
-        }
-      }, { timeoutMs: 15_000 });
-    } finally {
-      alarm.close();
-    }
+    await eventually(async () => {
+      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
+      for (const n of ['Porch Sensor', 'Back Door']) {
+        assert.ok(names.has(n), `accessory "${n}" not yet registered`);
+      }
+    }, { timeoutMs: 15_000 });
   });
 });
 
@@ -1097,30 +997,26 @@ describe('E2E: partition state query serialization', { timeout: 30_000 }, () => 
   after(async () => { await fix?.stop(); });
 
   it('issues 2310 DATA-REQs one at a time and updates every partition', async () => {
-    const alarm = await connectAlarmSystem(fix);
+    using alarm = await connectAlarmSystem(fix);
     const hb = homeBridgeFor(fix);
-    try {
-      // Pima system-key status → HomeKit current state:
-      //   3=FullArmed→AWAY_ARM(1), 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
-      const expected = [
-        { partition: 1, accessoryName: 'Part One',   pimaStatus: 3, homekitState: 1 },
-        { partition: 2, accessoryName: 'Part Two',   pimaStatus: 4, homekitState: 0 },
-        { partition: 3, accessoryName: 'Part Three', pimaStatus: 5, homekitState: 2 },
-      ];
+    // Pima system-key status → HomeKit current state:
+    //   3=FullArmed→AWAY_ARM(1), 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
+    const expected = [
+      { partition: 1, accessoryName: 'Part One',   pimaStatus: 3, homekitState: 1 },
+      { partition: 2, accessoryName: 'Part Two',   pimaStatus: 4, homekitState: 0 },
+      { partition: 3, accessoryName: 'Part Three', pimaStatus: 5, homekitState: 2 },
+    ];
 
-      for (const { partition, pimaStatus } of expected) {
-        const q = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition });
-        alarm.respond(q, partitionStatus({ status: pimaStatus }));
-      }
+    for (const { partition, pimaStatus } of expected) {
+      const q = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition });
+      alarm.respond(q, partitionStatus({ status: pimaStatus }));
+    }
 
-      for (const { accessoryName, homekitState } of expected) {
-        await eventually(async () => assert.equal(
-          await hb.partition(accessoryName).currentState(),
-          homekitState,
-        ));
-      }
-    } finally {
-      alarm.close();
+    for (const { accessoryName, homekitState } of expected) {
+      await eventually(async () => assert.equal(
+        await hb.partition(accessoryName).currentState(),
+        homekitState,
+      ));
     }
   });
 });

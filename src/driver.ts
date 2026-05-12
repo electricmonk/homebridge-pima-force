@@ -88,6 +88,11 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.transport.stop();
   }
 
+  /** Alias for `stop()` — lets callers use `await using driver = ...`. */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.stop();
+  }
+
   isConnected(): boolean {
     return this.transport.isConnected();
   }
