@@ -571,6 +571,76 @@ describe('PimaDriver — request timeout', () => {
   });
 });
 
+describe('PimaDriver — config validation', () => {
+  // Without validation, a `requestTimeoutMs` of `0` / negative / non-finite
+  // would silently make every request time out almost immediately.
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    it(`rejects requestTimeoutMs=${bad} at construction`, () => {
+      assert.throws(
+        () => new PimaDriver({
+          port: 0,
+          account: 1234,
+          partitions: [{ id: 1, userCode: '1111' }],
+          requestTimeoutMs: bad,
+        }),
+        /requestTimeoutMs.*finite positive/,
+      );
+    });
+  }
+
+  it('accepts a positive finite requestTimeoutMs', () => {
+    assert.doesNotThrow(() => new PimaDriver({
+      port: 0,
+      account: 1234,
+      partitions: [{ id: 1, userCode: '1111' }],
+      requestTimeoutMs: 100,
+    }));
+  });
+});
+
+describe('PimaDriver — inbound retransmit dedup', () => {
+  let h: Harness | null = null;
+  beforeEach(async () => { h = await setupVerified(); });
+  afterEach(async () => { await teardown(h); h = null; });
+
+  // Per spec §4.5.2 (and PROTOCOL.md): the panel resends an event with the
+  // same counter if its previous send wasn't acknowledged. We must always
+  // re-ACK so the panel knows the retransmit landed, but we must NOT re-emit
+  // the typed driver event — that would fire HomeKit handlers (zone open,
+  // alarm triggered, etc.) twice for a single physical event.
+  it('emits a typed event only once for back-to-back retransmits, but ACKs each one', async () => {
+    const zoneEvents: Array<{ zone: number; partition: number; active: boolean }> = [];
+    h!.driver.on('zone', (e) => zoneEvents.push(e));
+
+    const send = (): void => {
+      h!.alarm.write('{"frame_type":"event","counter":50,"account":"1234","type":760,"qualifier":1,"zone":4,"partition":2}');
+    };
+    send();
+    send();
+
+    // Both ACKs go out (one per inbound frame), but only one zone event surfaces.
+    await waitForRx(h!, 2);
+    const acks = h!.rxFromDriver.filter((f) => f.frame_type === 'ACK' && Number(f.counter) === 50);
+    assert.equal(acks.length, 2, `expected to re-ACK both retransmits; got ${acks.length}`);
+
+    // Give the listener a moment to (incorrectly) re-fire if dedup is missing.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(zoneEvents.length, 1, `expected exactly one typed zone event; got ${zoneEvents.length}: ${JSON.stringify(zoneEvents)}`);
+  });
+
+  it('does NOT dedup an event with a different counter', async () => {
+    const zoneEvents: Array<{ zone: number; partition: number; active: boolean }> = [];
+    h!.driver.on('zone', (e) => zoneEvents.push(e));
+
+    h!.alarm.write('{"frame_type":"event","counter":50,"account":"1234","type":760,"qualifier":1,"zone":4,"partition":2}');
+    h!.alarm.write('{"frame_type":"event","counter":51,"account":"1234","type":760,"qualifier":3,"zone":4,"partition":2}');
+
+    await waitForRx(h!, 2);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(zoneEvents.length, 2, `expected both events to surface; got ${JSON.stringify(zoneEvents)}`);
+  });
+});
+
 describe('PimaDriver — requestData password override', () => {
   it('requestData succeeds with params.password when no partitions configured', async () => {
     const driver = new PimaDriver({

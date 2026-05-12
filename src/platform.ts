@@ -7,6 +7,7 @@ import type {
   PlatformConfig,
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
+import { paginateDataResponse } from './pagination.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
 import {
   OUTPUT_EXTERNAL_SIREN,
@@ -471,17 +472,13 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
    * Issue a DATA-REQ and follow the panel's pagination ("more: yes") until
    * the full parameter range is collected. The driver serializes the wire
    * traffic and resolves with each single-frame response; this helper just
-   * stitches the pages together.
+   * stitches the pages together via the shared paginator (which fails fast
+   * if the panel ever sends `more: true` with no parameters).
    */
-  private async requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
-    const all: string[] = [];
-    let cursor = startOrder;
-    while (true) {
-      const res = await this.driver.requestData({ id, startOrder: cursor, stopOrder });
-      all.push(...res.parameters);
-      if (!res.more) return all;
-      cursor = startOrder + all.length;
-    }
+  private requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
+    return paginateDataResponse(startOrder, (cursor) =>
+      this.driver.requestData({ id, startOrder: cursor, stopOrder }),
+    );
   }
 
   /**

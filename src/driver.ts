@@ -100,6 +100,12 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   /**
    * Arm a partition. Defaults to AWAY (full arm). Panel-recognized modes
    * are mapped per Appendix B of the Force JSON spec.
+   *
+   * Settlement (shared by every domain method below): the returned promise
+   * resolves only when the panel ACKs the OPERATION (counter-matched), and
+   * rejects on a counter-matched NAK, on the per-request timeout, or if the
+   * panel disconnects mid-flight. Calls are serialised on the wire — a
+   * second call won't write anything until the first has settled.
    */
   arm(partition: number, mode: ArmMode = 'away'): Promise<void> {
     const optype = ARM_MODE_TO_OPTYPE[mode];
@@ -109,6 +115,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.sendOperation(optype, partition);
   }
 
+  /** Disarm a partition. See {@link arm} for settlement semantics. */
   disarm(partition: number): Promise<void> {
     return this.sendOperation(OPTYPE_DISARM, partition);
   }
@@ -118,7 +125,8 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * 2 = internal siren, 34-41 = controlled outputs 1-8 (Appendix B).
    *
    * The OPERATION partition field is 0 (panel-wide). The user code from
-   * the first configured partition is used to authorize.
+   * the first configured partition is used to authorize. See {@link arm}
+   * for settlement semantics.
    */
   setOutput(output: number, active: boolean): Promise<void> {
     const part = this.config.partitions[0];
@@ -137,11 +145,17 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
 
   /**
    * Request a configuration/status parameter from the panel. Resolves with
-   * the matching DATA frame's contents. Authorization uses the first
-   * configured partition's user code unless `params.password` is provided.
+   * the matching DATA frame's contents (counter-matched at the transport).
+   * Rejects on a counter-matched NAK, on the per-request timeout, or if the
+   * panel disconnects mid-flight. Authorization uses the first configured
+   * partition's user code unless `params.password` is provided.
+   *
+   * Calls are serialised with all other outbound commands (arm/disarm/
+   * setOutput) — only one DATA-REQ or OPERATION is on the wire at a time.
    *
    * Pagination is not handled here — when `more` is true, the caller is
-   * responsible for issuing the follow-up request.
+   * responsible for issuing the follow-up request. See `paginateDataResponse`
+   * in `src/pagination.ts` for the canonical loop.
    */
   requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
     const part = this.config.partitions[0];

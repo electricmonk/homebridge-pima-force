@@ -21,6 +21,20 @@ import type { PanelFrame } from './types.js';
  */
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 
+/**
+ * Coerce a timeout value to a finite positive number, falling back to the
+ * supplied default for missing / non-finite / `≤ 0` inputs. A `setTimeout`
+ * with a non-positive delay fires almost immediately, so an unvalidated
+ * config value would silently turn every request into an instant timeout.
+ */
+function normaliseTimeoutMs(value: number | undefined, defaultMs: number, label: string): number {
+  if (value === undefined) return defaultMs;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label}: must be a finite positive number; got ${value}`);
+  }
+  return value;
+}
+
 export interface PimaTransportConfig {
   port: number;
   account: number;
@@ -107,12 +121,28 @@ export class PimaTransport extends EventEmitter<PimaTransportEvents> {
    * individual failures.
    */
   private wireQueueTail: Promise<unknown> = Promise.resolve();
+  /**
+   * Counter of the last inbound frame we forwarded as `panelFrame`, per
+   * connection. Spec §4.5.2: the panel resends an event with the same
+   * counter if it didn't see our ACK. We must always re-ACK the retransmit
+   * (handled in `handleData`) but we must NOT re-emit it to the driver,
+   * or HomeKit handlers (zone open, alarm triggered, etc.) would fire
+   * twice for a single physical event. Reset on disconnect.
+   */
+  private lastForwardedCounter: number | null = null;
   private inflight: Inflight | null = null;
+  /** Validated default timeout. Always finite and > 0. */
+  private readonly defaultRequestTimeoutMs: number;
 
   constructor(private readonly config: PimaTransportConfig) {
     super();
     this.opCounterStart = config.opCounterStart ?? 5000;
     this.opCounter = this.opCounterStart;
+    this.defaultRequestTimeoutMs = normaliseTimeoutMs(
+      config.requestTimeoutMs,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      'requestTimeoutMs',
+    );
   }
 
   start(): Promise<void> {
@@ -182,7 +212,11 @@ export class PimaTransport extends EventEmitter<PimaTransportEvents> {
       const counter = this.opCounter++;
       const { frameObj, bytes, match } = this.buildRequest(request, counter);
 
-      const timeoutMs = options.timeoutMs ?? this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+      const timeoutMs = normaliseTimeoutMs(
+        options.timeoutMs,
+        this.defaultRequestTimeoutMs,
+        'options.timeoutMs',
+      );
       const cleanup = (): void => {
         clearTimeout(timer);
         this.off('disconnected', onDisconnected);
@@ -289,6 +323,7 @@ export class PimaTransport extends EventEmitter<PimaTransportEvents> {
     }
     this.activeSocket = sock;
     this.panelVerified = false;
+    this.lastForwardedCounter = null;
     this.emit('connected');
 
     sock.on('data', (buf) => this.handleData(sock, buf));
@@ -376,6 +411,16 @@ export class PimaTransport extends EventEmitter<PimaTransportEvents> {
     }
 
     // Not for the in-flight — forward upstream for the driver to interpret.
+    // Dedup successive same-counter retransmits (spec §4.5.2): the panel
+    // resends an event with the same counter when our ACK didn't land.
+    // We've already re-ACKed in handleData; suppress the duplicate emit so
+    // typed driver events (zone, arm, alarm, …) fire exactly once per
+    // physical event.
+    const counter = typeof frame.counter === 'number' ? frame.counter : null;
+    if (counter !== null && counter === this.lastForwardedCounter) {
+      return;
+    }
+    if (counter !== null) this.lastForwardedCounter = counter;
     this.emit('panelFrame', frame);
   }
 }
