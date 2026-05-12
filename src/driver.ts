@@ -98,6 +98,17 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   }
 
   /**
+   * Port the TCP server is bound to. Throws if not started — tests usually
+   * have just called `start()` and would rather not unwrap `address()?.port`
+   * every time.
+   */
+  port(): number {
+    const addr = this.transport.address();
+    if (!addr) throw new Error('PimaDriver.port: not started');
+    return addr.port;
+  }
+
+  /**
    * Arm a partition. Defaults to AWAY (full arm). Panel-recognized modes
    * are mapped per Appendix B of the Force JSON spec.
    *
