@@ -88,6 +88,11 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.transport.stop();
   }
 
+  /** Alias for `stop()` — lets callers use `await using driver = ...`. */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.stop();
+  }
+
   isConnected(): boolean {
     return this.transport.isConnected();
   }
@@ -95,6 +100,17 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   /** Address the TCP server is bound to. Null when not started. Mainly for tests. */
   address(): import('node:net').AddressInfo | null {
     return this.transport.address();
+  }
+
+  /**
+   * Port the TCP server is bound to. Throws if not started — tests usually
+   * have just called `start()` and would rather not unwrap `address()?.port`
+   * every time.
+   */
+  port(): number {
+    const addr = this.transport.address();
+    if (!addr) throw new Error('PimaDriver.port: not started');
+    return addr.port;
   }
 
   /**

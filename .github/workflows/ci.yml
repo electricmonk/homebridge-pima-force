@@ -76,6 +76,8 @@ jobs:
             filters: |
               code:
                 - 'src/**'
+                - '!src/**/*.test.ts'
+                - '!src/test-support/**'
                 - 'package.json'
                 - 'package-lock.json'
                 - 'tsconfig.json'
