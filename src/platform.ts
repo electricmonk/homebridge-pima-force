@@ -7,11 +7,11 @@ import type {
   PlatformConfig,
 } from 'homebridge';
 import { PimaDriver } from './driver.js';
+import { paginateDataResponse } from './pagination.js';
 import { PartitionSecuritySystem, type PartitionAccessoryContext } from './partition-security-system.js';
 import {
   OUTPUT_EXTERNAL_SIREN,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
-  PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
 } from './protocol.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
@@ -27,7 +27,6 @@ interface ZoneConfig {
 
 const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
 const DEFAULT_SIREN_NAME = 'Alarm Siren';
-const ZONE_DISCOVERY_TIMEOUT_MS = 5000;
 const ZONE_NAMES_PAGE_SIZE = 16;
 
 interface PartitionConfigEntry {
@@ -56,6 +55,12 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   encoding?: string;
   /** When true, log every frame in/out at info level (passwords redacted). */
   debug?: boolean;
+  /**
+   * Default per-request timeout in ms (DATA-REQ → DATA, OPERATION → ACK).
+   * Defaults to 5000. Lower it in tests to keep an unanswered query from
+   * stalling the wire queue for the production 5 s window.
+   */
+  requestTimeoutMs?: number;
 }
 
 type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
@@ -103,6 +108,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       account: config.account ?? 1234,
       partitions: partitions.map((p) => ({ id: p.id, userCode: p.userCode })),
       encoding: (config.encoding?.trim() || undefined) ?? 'windows-1255',
+      requestTimeoutMs: config.requestTimeoutMs,
     });
 
     this.driver.on('connected', () => log.info('alarm panel connected'));
@@ -114,10 +120,16 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     // ever sending a frame.
     this.driver.on('verified', () => {
       log.debug('panel identity verified — querying partition states');
-      this.queryPartitionStates();
-      if (!this.autoDiscoveryAttempted) {
-        void this.maybeDiscoverNewZones();
-      }
+      // The driver serializes DATA-REQs internally, but we still chain these
+      // two phases explicitly so the partition-state queries finish (or time
+      // out) before zone discovery starts. That keeps the wire trace easy
+      // to read in `debug: true` logs and bounds discovery's max latency.
+      void (async () => {
+        await this.queryPartitionStates();
+        if (!this.autoDiscoveryAttempted) {
+          await this.maybeDiscoverNewZones();
+        }
+      })();
     });
     this.driver.on('disconnected', () => log.info('alarm panel disconnected'));
     this.driver.on('error', (err) => log.error(`driver error: ${err.message}`));
@@ -170,21 +182,6 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('system', ({ kind, ok, channel, partition }) => {
       log.debug(`system ${kind} channel ${channel} partition ${partition} → ${ok ? 'restored' : 'trouble'}`);
     });
-    this.driver.on('data', ({ id, startOrder, parameters, more }) => {
-      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
-      if (more) {
-        log.warn(`DATA id=2310 returned more=true (startOrder=${startOrder}, count=${parameters.length}); additional pages not fetched`);
-      }
-      for (let i = 0; i < parameters.length; i++) {
-        const partitionId = startOrder + i;
-        const status = Number(parameters[i]);
-        const acc = this.partitions.get(partitionId);
-        if (acc) {
-          log.info(`partition ${partitionId} startup state: ${status}`);
-          acc.setStateFromStartupStatus(status);
-        }
-      }
-    });
     this.driver.on('nak', ({ counter, account, reason }) => {
       // The panel rejected an OPERATION/ACK we sent. Log loudly so the user
       // can see why a command (e.g. siren mute) silently didn't take effect.
@@ -216,44 +213,37 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.cachedAccessories.set(accessory.UUID, accessory as PlatformAccessory<AnyContext>);
   }
 
-  private queryPartitionStates(): void {
+  private async queryPartitionStates(): Promise<void> {
     const partitions = this.config.partitions ?? [];
     if (partitions.length === 0) return;
 
-    const pending = new Set(partitions.map((p) => p.id));
-
-    const tid = setTimeout(() => {
-      this.driver.off('data', listener);
-      if (pending.size > 0) {
-        this.log.warn(
-          `startup state query timed out for partition(s) ${[...pending].join(', ')} — HomeKit state may be stale until next reconnect`,
-        );
-      }
-    }, 10_000);
-    tid.unref();
-
-    const listener = ({ id, startOrder, parameters }: { id: number; startOrder: number; parameters: string[]; more: boolean }) => {
-      if (id !== PARAM_ID_SYSTEM_KEY_STATUS) return;
-      for (let i = 0; i < parameters.length; i++) {
-        pending.delete(startOrder + i);
-      }
-      if (pending.size === 0) {
-        clearTimeout(tid);
-        this.driver.off('data', listener);
-      }
-    };
-
-    this.driver.on('data', listener);
-
+    // Sequential by construction: the transport serializes wire commands,
+    // so awaiting each call here is enough to satisfy the panel's one-
+    // command-at-a-time contract.
+    const stale: number[] = [];
     for (const p of partitions) {
-      this.driver.getSystemKeyStatus(p.id).catch((err: Error) => {
-        this.log.warn(`failed to query state for partition ${p.id}: ${err.message}`);
-        pending.delete(p.id);
-        if (pending.size === 0) {
-          clearTimeout(tid);
-          this.driver.off('data', listener);
+      try {
+        const res = await this.driver.getSystemKeyStatus(p.id);
+        if (res.more) {
+          this.log.warn(`DATA id=2310 returned more=true (partition=${p.id}, count=${res.parameters.length}); additional pages not fetched`);
         }
-      });
+        // 2310 with start_order=stop_order=partitionId returns a single value:
+        // the system key status for that partition.
+        const status = Number(res.parameters[0]);
+        const acc = this.partitions.get(p.id);
+        if (acc) {
+          this.log.info(`partition ${p.id} startup state: ${status}`);
+          acc.setStateFromStartupStatus(status);
+        }
+      } catch (err) {
+        this.log.warn(`failed to query state for partition ${p.id}: ${(err as Error).message}`);
+        stale.push(p.id);
+      }
+    }
+    if (stale.length > 0) {
+      this.log.warn(
+        `startup state query timed out for partition(s) ${stale.join(', ')} — HomeKit state may be stale until next reconnect`,
+      );
     }
   }
 
@@ -479,57 +469,16 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Issue a DATA-REQ and resolve with the matching DATA event's parameters.
-   * Rejects only on NAKs whose counter matches our in-flight request, so
-   * unrelated NAKs (e.g. from a concurrent arm/disarm operation) are ignored.
+   * Issue a DATA-REQ and follow the panel's pagination ("more: yes") until
+   * the full parameter range is collected. The driver serializes the wire
+   * traffic and resolves with each single-frame response; this helper just
+   * stitches the pages together via the shared paginator (which fails fast
+   * if the panel ever sends `more: true` with no parameters).
    */
   private requestParameter(id: number, startOrder: number, stopOrder: number): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-      const allParams: string[] = [];
-      let nextStart = startOrder;
-      let inflightCounter: number | undefined;
-
-      const cleanup = (): void => {
-        clearTimeout(timer);
-        this.driver.off('data', dataHandler);
-        this.driver.off('nak', nakHandler);
-      };
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error(`timeout waiting for DATA id=${id} start=${startOrder}`));
-      }, ZONE_DISCOVERY_TIMEOUT_MS);
-      const dataHandler = (msg: { id: number; startOrder: number; parameters: string[]; more: boolean }): void => {
-        if (msg.id !== id || msg.startOrder !== nextStart) return;
-        allParams.push(...msg.parameters);
-        if (!msg.more) {
-          cleanup();
-          resolve(allParams);
-          return;
-        }
-        // Panel split the response; request the next fragment.
-        nextStart = startOrder + allParams.length;
-        this.driver.requestData({ id, startOrder: nextStart, stopOrder }).then((c) => {
-          inflightCounter = c;
-        }).catch((err) => {
-          cleanup();
-          reject(err);
-        });
-      };
-      const nakHandler = ({ counter, reason }: { counter?: number; reason: string }): void => {
-        // Ignore NAKs that don't match our in-flight counter (e.g. concurrent arm/disarm).
-        if (inflightCounter !== undefined && counter !== undefined && counter !== inflightCounter) return;
-        cleanup();
-        reject(new Error(`panel NAK: ${reason} (counter=${counter ?? '?'})`));
-      };
-      this.driver.on('data', dataHandler);
-      this.driver.on('nak', nakHandler);
-      this.driver.requestData({ id, startOrder, stopOrder }).then((c) => {
-        inflightCounter = c;
-      }).catch((err) => {
-        cleanup();
-        reject(err);
-      });
-    });
+    return paginateDataResponse(startOrder, (cursor) =>
+      this.driver.requestData({ id, startOrder: cursor, stopOrder }),
+    );
   }
 
   /**

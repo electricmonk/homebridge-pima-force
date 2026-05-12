@@ -1,18 +1,11 @@
 import { EventEmitter } from 'node:events';
-import net from 'node:net';
 import {
-  ackFrame,
-  buildAck,
-  buildDataReq,
-  buildOperation,
-  dataReqFrame,
   EVENT_TYPE_BURGLARY,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
   EVENT_TYPE_OUTPUT,
   EVENT_TYPE_REMOTE_ARM,
   EVENT_TYPE_ZONE,
-  operationFrame,
   OPTYPE_ACTIVATE_OUTPUT,
   OPTYPE_ARM_AWAY,
   OPTYPE_ARM_HOME1,
@@ -25,14 +18,14 @@ import {
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
   PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
-  parseFrames,
   QUALIFIER_NEW,
   QUALIFIER_RESTORE,
-  shouldAck,
 } from './protocol.js';
+import { PimaTransport } from './transport.js';
 import type {
   ArmEventSource,
   ArmMode,
+  DataResponse,
   PanelFrame,
   PartitionConfig,
   PimaDriverConfig,
@@ -49,60 +42,70 @@ const ARM_MODE_TO_OPTYPE: Record<ArmMode, number> = {
 };
 
 /**
- * Driver for the Pima FORCE alarm panel local CMS protocol.
+ * Domain layer for the Pima FORCE local CMS protocol. Translates HomeKit-
+ * level operations (arm/disarm, output toggles, parameter queries) into
+ * the wire-protocol `OutboundRequest` shapes the transport understands, and
+ * translates inbound panel-originated frames into typed driver events.
  *
- * Architecturally inverted: the panel is the TCP client and dials *out*
- * to us. We act as the CMS receiver. We can issue OPERATION commands
- * (arm/disarm) only while a panel-initiated connection is live.
+ * Owns no socket / counter / wire-queue state — that lives in `PimaTransport`.
+ * The driver simply re-emits the transport's lifecycle/debug events and
+ * dispatches `panelFrame` into the typed event surface used by the platform.
  */
 export class PimaDriver extends EventEmitter<PimaDriverEvents> {
   private readonly config: PimaDriverConfig;
   private readonly partitionByCode: Map<number, PartitionConfig>;
-  private server: net.Server | null = null;
-  private activeSocket: net.Socket | null = null;
-  private opCounter: number;
-  /** True once the panel has sent a frame with a matching account number. */
-  private panelVerified = false;
+  private readonly transport: PimaTransport;
 
   constructor(config: PimaDriverConfig) {
     super();
     this.config = config;
     this.partitionByCode = new Map(config.partitions.map((p) => [p.id, p]));
-    this.opCounter = config.opCounterStart ?? 5000;
+    this.transport = new PimaTransport({
+      port: config.port,
+      account: config.account,
+      encoding: config.encoding,
+      opCounterStart: config.opCounterStart,
+      requestTimeoutMs: config.requestTimeoutMs,
+    });
+
+    // Lifecycle + debug events pass through unchanged.
+    this.transport.on('connected', () => this.emit('connected'));
+    this.transport.on('verified', () => this.emit('verified'));
+    this.transport.on('disconnected', () => this.emit('disconnected'));
+    this.transport.on('error', (err) => this.emit('error', err));
+    this.transport.on('frameIn', (f) => this.emit('frameIn', f));
+    this.transport.on('frameOut', (f) => this.emit('frameOut', f));
+
+    // Inbound panel frames not claimed by an in-flight `send` come here.
+    this.transport.on('panelFrame', (frame) => this.dispatchPanelFrame(frame));
   }
 
   start(): Promise<void> {
-    if (this.server) throw new Error('driver already started');
-    return new Promise((resolve, reject) => {
-      const server = net.createServer((sock) => this.handleConnection(sock));
-      server.once('error', reject);
-      server.listen(this.config.port, () => {
-        server.removeListener('error', reject);
-        this.server = server;
-        resolve();
-      });
-    });
+    return this.transport.start();
   }
 
   stop(): Promise<void> {
-    return new Promise((resolve) => {
-      this.activeSocket?.destroy();
-      this.activeSocket = null;
-      if (!this.server) return resolve();
-      this.server.close(() => {
-        this.server = null;
-        resolve();
-      });
-    });
+    return this.transport.stop();
   }
 
   isConnected(): boolean {
-    return this.activeSocket !== null && !this.activeSocket.destroyed;
+    return this.transport.isConnected();
+  }
+
+  /** Address the TCP server is bound to. Null when not started. Mainly for tests. */
+  address(): import('node:net').AddressInfo | null {
+    return this.transport.address();
   }
 
   /**
    * Arm a partition. Defaults to AWAY (full arm). Panel-recognized modes
    * are mapped per Appendix B of the Force JSON spec.
+   *
+   * Settlement (shared by every domain method below): the returned promise
+   * resolves only when the panel ACKs the OPERATION (counter-matched), and
+   * rejects on a counter-matched NAK, on the per-request timeout, or if the
+   * panel disconnects mid-flight. Calls are serialised on the wire — a
+   * second call won't write anything until the first has settled.
    */
   arm(partition: number, mode: ArmMode = 'away'): Promise<void> {
     const optype = ARM_MODE_TO_OPTYPE[mode];
@@ -112,6 +115,7 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     return this.sendOperation(optype, partition);
   }
 
+  /** Disarm a partition. See {@link arm} for settlement semantics. */
   disarm(partition: number): Promise<void> {
     return this.sendOperation(OPTYPE_DISARM, partition);
   }
@@ -121,196 +125,114 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * 2 = internal siren, 34-41 = controlled outputs 1-8 (Appendix B).
    *
    * The OPERATION partition field is 0 (panel-wide). The user code from
-   * the first configured partition is used to authorize.
+   * the first configured partition is used to authorize. See {@link arm}
+   * for settlement semantics.
    */
+  setOutput(output: number, active: boolean): Promise<void> {
+    const part = this.config.partitions[0];
+    if (!part) {
+      return Promise.reject(new Error('no partition configured to derive a user code for output operation'));
+    }
+    return this.transport.send({
+      kind: 'operation',
+      account: this.config.account,
+      password: part.userCode,
+      optype: active ? OPTYPE_ACTIVATE_OUTPUT : OPTYPE_DEACTIVATE_OUTPUT,
+      partition: 0,
+      order: output,
+    }).then(() => undefined);
+  }
+
   /**
-   * Request a configuration/status parameter from the panel (DATA-REQ).
-   * The response arrives asynchronously as a `data` event (or a `nak` if
-   * the panel rejects). Authorization uses the first configured partition's
-   * user code, same as output operations.
+   * Request a configuration/status parameter from the panel. Resolves with
+   * the matching DATA frame's contents (counter-matched at the transport).
+   * Rejects on a counter-matched NAK, on the per-request timeout, or if the
+   * panel disconnects mid-flight. Authorization uses the first configured
+   * partition's user code unless `params.password` is provided.
+   *
+   * Calls are serialised with all other outbound commands (arm/disarm/
+   * setOutput) — only one DATA-REQ or OPERATION is on the wire at a time.
+   *
+   * Pagination is not handled here — when `more` is true, the caller is
+   * responsible for issuing the follow-up request. See `paginateDataResponse`
+   * in `src/pagination.ts` for the canonical loop.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<number> {
+  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
     const part = this.config.partitions[0];
     if (!part && !params.password) {
       return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
     }
-    return new Promise((resolve, reject) => {
-      const sock = this.activeSocket;
-      if (!sock || sock.destroyed) {
-        return reject(new Error('no active panel connection'));
-      }
-      if (!this.panelVerified) {
-        return reject(new Error('panel identity not yet verified; retry after verified event'));
-      }
-      const reqParams = {
-        account: this.config.account,
-        counter: this.opCounter++,
-        password: params.password ?? part!.userCode,
-        id: params.id,
-        startOrder: params.startOrder,
-        stopOrder: params.stopOrder,
-      };
-      this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve(reqParams.counter)));
-    });
+    return this.transport.send({
+      kind: 'data-req',
+      account: this.config.account,
+      password: params.password ?? part!.userCode,
+      id: params.id,
+      startOrder: params.startOrder,
+      stopOrder: params.stopOrder,
+    }).then((frame) => this.toDataResponse(frame));
   }
 
   /** Convenience: request the panel's zone names (parameter id 260). */
-  getZoneNames(startOrder = 1, stopOrder?: number): Promise<number> {
+  getZoneNames(startOrder = 1, stopOrder?: number): Promise<DataResponse> {
     return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
   }
 
   /** Convenience: request the count of installed zones (parameter id 2148). */
-  getZoneCount(): Promise<number> {
+  getZoneCount(): Promise<DataResponse> {
     return this.requestData({ id: PARAM_ID_NUMBER_OF_INSTALLED_ZONES, startOrder: 1, stopOrder: 1 });
   }
 
   /**
    * Query the System Key Status (parameter id 2310) for a single partition,
    * authenticating with that partition's own user code.
-   * The response arrives as a `data` event with id=2310 and startOrder=partitionId.
    */
-  getSystemKeyStatus(partitionId: number): Promise<void> {
+  getSystemKeyStatus(partitionId: number): Promise<DataResponse> {
     const part = this.partitionByCode.get(partitionId);
     if (!part) {
       return Promise.reject(new Error(`partition ${partitionId} not configured`));
     }
-    return new Promise((resolve, reject) => {
-      const sock = this.activeSocket;
-      if (!sock || sock.destroyed) {
-        return reject(new Error('no active panel connection'));
-      }
-      if (!this.panelVerified) {
-        return reject(new Error('panel identity not yet verified; retry after verified event'));
-      }
-      const reqParams = {
-        account: this.config.account,
-        counter: this.opCounter++,
-        password: part.userCode,
-        id: PARAM_ID_SYSTEM_KEY_STATUS,
-        startOrder: partitionId,
-        stopOrder: partitionId,
-      };
-      this.emit('frameOut', dataReqFrame(reqParams));
-      sock.write(buildDataReq(reqParams), (err) => (err ? reject(err) : resolve()));
-    });
-  }
-
-  setOutput(output: number, active: boolean): Promise<void> {
-    const part = this.config.partitions[0];
-    if (!part) {
-      return Promise.reject(new Error('no partition configured to derive a user code for output operation'));
-    }
-    return new Promise((resolve, reject) => {
-      const sock = this.activeSocket;
-      if (!sock || sock.destroyed) {
-        return reject(new Error('no active panel connection'));
-      }
-      if (!this.panelVerified) {
-        return reject(new Error('panel identity not yet verified; retry after verified event'));
-      }
-      const params = {
-        account: this.config.account,
-        counter: this.opCounter++,
-        optype: active ? OPTYPE_ACTIVATE_OUTPUT : OPTYPE_DEACTIVATE_OUTPUT,
-        partition: 0,
-        order: output,
-        password: part.userCode,
-      };
-      this.emit('frameOut', operationFrame(params));
-      sock.write(buildOperation(params), (err) => (err ? reject(err) : resolve()));
+    return this.requestData({
+      id: PARAM_ID_SYSTEM_KEY_STATUS,
+      startOrder: partitionId,
+      stopOrder: partitionId,
+      password: part.userCode,
     });
   }
 
   private sendOperation(optype: number, partition: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const sock = this.activeSocket;
-      if (!sock || sock.destroyed) {
-        return reject(new Error('no active panel connection'));
-      }
-      if (!this.panelVerified) {
-        return reject(new Error('panel identity not yet verified; retry after verified event'));
-      }
-      const part = this.partitionByCode.get(partition);
-      if (!part) {
-        return reject(new Error(`partition ${partition} not configured`));
-      }
-      const params = {
-        account: this.config.account,
-        counter: this.opCounter++,
-        optype,
-        partition,
-        password: part.userCode,
-      };
-      this.emit('frameOut', operationFrame(params));
-      sock.write(buildOperation(params), (err) => (err ? reject(err) : resolve()));
-    });
-  }
-
-  private handleConnection(sock: net.Socket): void {
-    // The panel only opens one connection at a time per CMS path. If a new
-    // one arrives while we still have an old socket reference, drop the old.
-    if (this.activeSocket && !this.activeSocket.destroyed) {
-      this.activeSocket.destroy();
+    const part = this.partitionByCode.get(partition);
+    if (!part) {
+      return Promise.reject(new Error(`partition ${partition} not configured`));
     }
-    this.activeSocket = sock;
-    this.panelVerified = false;
-    this.emit('connected');
-
-    sock.on('data', (buf) => this.handleData(sock, buf));
-    sock.on('error', (err) => this.emit('error', err));
-    sock.on('close', () => {
-      if (this.activeSocket === sock) {
-        this.activeSocket = null;
-        this.emit('disconnected');
-      }
-    });
+    return this.transport.send({
+      kind: 'operation',
+      account: this.config.account,
+      password: part.userCode,
+      optype,
+      partition,
+    }).then(() => undefined);
   }
 
-  private handleData(sock: net.Socket, buf: Buffer): void {
-    // TCP can coalesce back-to-back writes into one data event, so handle
-    // multiple frames per chunk. We don't currently buffer across chunks
-    // (a frame split across two TCP segments would be lost) — this hasn't
-    // been observed in practice on a LAN with the panel.
-    for (const frame of parseFrames(buf, this.config.encoding)) {
-      this.emit('frameIn', frame as unknown as Record<string, unknown>);
-
-      // Verify the connecting client is our panel by checking its account number
-      // on the first frame. Reject and close if it doesn't match — prevents a
-      // rogue TCP client from triggering DATA-REQ frames that carry user codes.
-      if (!this.panelVerified) {
-        const rawAccount = frame.account;
-        const accountOk =
-          typeof rawAccount === 'string' &&
-          /^\d+$/.test(rawAccount) &&
-          Number(rawAccount) === this.config.account;
-        if (!accountOk) {
-          this.emit('error', new Error(
-            `rejected connection: account=${frame.account} does not match expected ${this.config.account}`,
-          ));
-          sock.destroy();
-          return;
-        }
-        this.panelVerified = true;
-        this.emit('verified');
-      }
-
-      if (shouldAck(frame)) {
-        const ack = ackFrame(frame);
-        this.emit('frameOut', ack);
-        sock.write(buildAck(frame));
-      }
-      this.dispatch(frame);
+  private toDataResponse(frame: PanelFrame): DataResponse {
+    let params = Array.isArray(frame.parameters)
+      ? (frame.parameters as unknown[]).map(String)
+      : [];
+    if (this.config.reverseStrings) {
+      // Spread iterates by code point so non-BMP characters (e.g. emoji)
+      // wouldn't get split mid-surrogate; for Hebrew this is just code
+      // unit reversal anyway since it's BMP.
+      params = params.map((s) => [...s].reverse().join(''));
     }
+    const more = (frame as { more?: string }).more === 'yes';
+    return { parameters: params, more };
   }
 
-  private dispatch(frame: PanelFrame): void {
+  private dispatchPanelFrame(frame: PanelFrame): void {
     const t = frame.frame_type;
-    if (t === 'null' || t === 'ACK') return; // bookkeeping; nothing to surface
 
     if (t === 'NAK') {
-      // Panel rejected something we sent. Surface it so callers can log the
-      // reason. We still don't ACK NAKs (would create a feedback storm).
+      // Unmatched NAKs (counter doesn't match an in-flight, or counter=0 from
+      // a panel-side JSON parse error). Surface so the platform can log it.
       this.emit('nak', {
         counter: typeof frame.counter === 'number' ? frame.counter : undefined,
         account: frame.account,
@@ -324,25 +246,8 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       return;
     }
 
-    if (t === 'DATA') {
-      // Response to a DATA-REQ we sent. Parameters are always strings per
-      // spec section 4.6.5; the consumer interprets them.
-      const id = Number(frame.id ?? 0);
-      const startOrder = Number(frame.start_order ?? 0);
-      let params = Array.isArray(frame.parameters)
-        ? frame.parameters.map(String)
-        : [];
-      if (this.config.reverseStrings) {
-        // Spread iterates by code point so non-BMP characters (e.g. emoji)
-        // wouldn't get split mid-surrogate; for Hebrew this is just code
-        // unit reversal anyway since it's BMP.
-        params = params.map((s) => [...s].reverse().join(''));
-      }
-      const more = frame.more === 'yes';
-      this.emit('data', { id, startOrder, parameters: params, more });
-      return;
-    }
-
+    // Stray DATA frames (shouldn't normally happen — every DATA should match
+    // an in-flight `send`) and any unrecognized frame types end up here.
     this.emit('unknown', frame);
   }
 

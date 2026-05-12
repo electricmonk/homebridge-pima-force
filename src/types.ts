@@ -19,6 +19,11 @@ export interface PimaDriverConfig {
   /** Starting value for our outgoing OPERATION counter. Default 5000. */
   opCounterStart?: number;
   /**
+   * Default per-request timeout in ms. Applies to every send (OPERATION
+   * and DATA-REQ). Defaults to 5000.
+   */
+  requestTimeoutMs?: number;
+  /**
    * Text encoding the panel uses for non-ASCII string values (zone names,
    * user names, etc.). JSON syntax characters are ASCII either way, so the
    * frame parses regardless; this only affects how we decode string
@@ -105,15 +110,13 @@ export interface NakEvent {
 }
 
 /**
- * Response to a DATA-REQ. The `parameters` array holds the requested
- * values starting at `startOrder`. `more` is true when the panel had to
- * split the response across multiple frames; the consumer should request
- * the remainder starting at `startOrder + parameters.length`.
+ * Resolved value from `PimaDriver.requestData` (and its convenience
+ * wrappers). `parameters` are the panel-returned values for the requested
+ * range, decoded to strings. `more` is true when the panel split the
+ * response across multiple frames; the caller is responsible for issuing
+ * the follow-up request starting at `startOrder + parameters.length`.
  */
-export interface DataEvent {
-  /** Parameter ID echoed from the request (e.g. 260 = zone names). */
-  id: number;
-  startOrder: number;
+export interface DataResponse {
   parameters: string[];
   more: boolean;
 }
@@ -169,7 +172,6 @@ export interface PimaDriverEvents {
   alarm: [AlarmEvent];
   system: [SystemEvent];
   nak: [NakEvent];
-  data: [DataEvent];
   unknown: [PanelFrame];
   error: [Error];
   /** Raw wire-level diagnostics: every parsed frame received from the panel. */
