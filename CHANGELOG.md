@@ -1,4 +1,32 @@
+## [0.1.17](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.16...v0.1.17) (2026-05-12)
+
+### Bug Fixes
+
+* serialize all HA→AS traffic on the wire — DATA-REQ and OPERATION now share a single in-flight slot, so back-to-back commands no longer race (the panel was answering the first and rejecting / dropping the rest with `NAK counter=0 "JSON frame"`; the visible symptom was partition state stuck on partition 1 only after startup) ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+* `arm` / `disarm` / `setOutput` now resolve only after the panel ACKs and reject on counter-matched NAK / per-request timeout / disconnect (previously they resolved on write-complete, so failures were silently lost) ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+* dedup successive same-counter inbound retransmits before forwarding to driver handlers; spec §4.5.2 retransmits no longer fire HomeKit handlers twice (zone open, alarm triggered, etc.). ACKs are still re-sent on every retransmit ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+* paginated DATA responses now fail fast if the panel ever returns `more: yes` with empty parameters — previously this re-issued the same DATA-REQ forever, starving the Node event loop ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+* validate `requestTimeoutMs` at the driver boundary; non-finite / `≤ 0` values would have silently turned every request into an instant timeout ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+
+### Refactor
+
+* split wire transport (`PimaTransport`) out of the driver — the transport owns the socket, counter allocator, request queue, panel verification and inbound ACKing; the driver shrinks to domain translation (arm modes ↔ optypes, event decoding) ([20da6ab](https://github.com/electricmonk/homebridge-pima-force/commit/20da6abc618334d1828d1b5e499983623f6320c8))
+
+## [0.1.16](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.15...v0.1.16) (2026-05-11)
+
+### Refactor
+
+* drop `homebridge` as a runtime peer dependency — the plugin no longer needs a Homebridge install at runtime (only at build time for HAP types) ([3825e93](https://github.com/electricmonk/homebridge-pima-force/commit/3825e93))
+
+### CI
+
+* bump GitHub Actions to the latest major versions ([#20](https://github.com/electricmonk/homebridge-pima-force/pull/20)) ([35634a2](https://github.com/electricmonk/homebridge-pima-force/commit/35634a2))
+
 ## [0.1.15](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.14...v0.1.15) (2026-05-11)
+
+### Features
+
+* support Homebridge 2.0 while retaining compatibility with 1.x — `peerDependencies` now accepts `^1.8.0 || ^2.0.0`, and the E2E test matrix covers both ([9ad32ad](https://github.com/electricmonk/homebridge-pima-force/commit/9ad32ad))
 
 ## [0.1.14](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.13...v0.1.14) (2026-05-11)
 
