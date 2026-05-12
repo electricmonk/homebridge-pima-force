@@ -12,50 +12,44 @@ import {
   PARAM_ID_SYSTEM_KEY_STATUS,
   PARTITION_FULL_ARMED,
 } from '../test-support/constants.js';
-import {
-  type E2EFixture,
-  connectAlarmSystem,
-  homeBridgeFor,
-  setupE2E,
-} from '../test-support/e2e-fixture.js';
+import { type E2EHarness, setupE2E } from '../test-support/e2e-fixture.js';
 import { eventually } from '../test-support/eventually.js';
 import {
   disarmedFromRemote,
   partitionStatus,
 } from '../test-support/frames.js';
+import { aPartition, aPluginConfig } from '../test-support/plugin-config.js';
 
-describe('E2E: partition state on connect (default fixture, partition 2)', { timeout: 60_000 }, () => {
-  let fix: E2EFixture;
+describe('E2E: partition state on connect (single partition)', { timeout: 60_000 }, () => {
+  const partition = aPartition();
+
+  let harness: E2EHarness;
   before(async () => {
-    fix = await setupE2E();
-    const hb = homeBridgeFor(fix);
+    harness = await setupE2E({
+      config: aPluginConfig({ partitions: [partition], zones: [] }),
+    });
     await eventually(async () => {
-      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
-      assert.ok(names.has('E2E Partition'));
+      const names = new Set((await harness.homebridge.listAccessories()).map((a) => a.serviceName));
+      assert.ok(names.has(partition.name));
     }, { timeoutMs: 15_000 });
   });
-  after(async () => { await fix?.stop(); });
+  after(async () => { await harness?.stop(); });
 
   it('on panel connect, queries partition state via DATA-REQ and reflects arm status', async () => {
-    using alarm = await connectAlarmSystem(fix);
-    const hb = homeBridgeFor(fix);
-    // Respond to the startup partition-state query: partition 2 = FullArmed
-    // (HomeKit AWAY_ARM).
-    const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: 2 });
+    using alarm = await harness.connectAlarm();
+    const inHomeKit = harness.homebridge.partition(partition.name);
+    // Respond to the startup partition-state query: FullArmed → AWAY_ARM.
+    const stateQ = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition.id });
     alarm.respond(stateQ, partitionStatus({ status: PARTITION_FULL_ARMED }));
 
-    await eventually(async () => assert.equal(
-      await hb.partition('E2E Partition').currentState(), AWAY_ARM,
-    ));
+    await eventually(async () => assert.equal(await inHomeKit.currentState(), AWAY_ARM));
 
     // Reset to disarmed so this test doesn't affect later tests. A stray DATA
     // frame won't work — the transport claims every DATA via in-flight
     // matching — so use the panel-side disarm event path (CID 407 q=1)
     // instead, which the driver dispatches as a `disarm` event.
-    await alarm.report(disarmedFromRemote({ partition: 2 }));
-    await eventually(async () => assert.equal(
-      await hb.partition('E2E Partition').currentState(), DISARMED,
-    ));
+    await alarm.report(disarmedFromRemote({ partition: partition.id }));
+    await eventually(async () => assert.equal(await inHomeKit.currentState(), DISARMED));
   });
 });
 
@@ -67,47 +61,44 @@ describe('E2E: partition state on connect (default fixture, partition 2)', { tim
  * arrived.
  */
 describe('E2E: partition state query serialisation (3 partitions)', { timeout: 30_000 }, () => {
-  const threePartitionConfig = {
-    name: 'Pima Serialization',
-    siren: { enabled: false },
-    partitions: [
-      { id: 1, name: 'Part One',   userCode: '1111' },
-      { id: 2, name: 'Part Two',   userCode: '2222' },
-      { id: 3, name: 'Part Three', userCode: '3333' },
-    ],
-    zones: [{ zone: 1, name: 'Serialization Zone', type: 'contact' }],
-  };
+  // Pima system-key status → HomeKit current state:
+  //   3=FullArmed→AWAY_ARM(1), 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
+  const partition1 = aPartition({ userCode: '1111' });
+  const partition2 = aPartition({ userCode: '2222' });
+  const partition3 = aPartition({ userCode: '3333' });
+  const cases = [
+    { partition: partition1, pimaStatus: 3, homekitState: 1 },
+    { partition: partition2, pimaStatus: 4, homekitState: 0 },
+    { partition: partition3, pimaStatus: 5, homekitState: 2 },
+  ];
 
-  let fix: E2EFixture;
+  let harness: E2EHarness;
   before(async () => {
-    fix = await setupE2E({ pimaPlatformOverride: threePartitionConfig });
-    const hb = homeBridgeFor(fix);
+    harness = await setupE2E({
+      config: aPluginConfig({
+        partitions: [partition1, partition2, partition3],
+        siren: { enabled: false },
+        zones: [],
+      }),
+    });
     await eventually(async () => {
-      const names = new Set((await hb.listAccessories()).map((a) => a.serviceName));
-      for (const n of ['Part One', 'Part Two', 'Part Three']) assert.ok(names.has(n));
+      const names = new Set((await harness.homebridge.listAccessories()).map((a) => a.serviceName));
+      for (const { partition } of cases) assert.ok(names.has(partition.name));
     }, { timeoutMs: 15_000 });
   });
-  after(async () => { await fix?.stop(); });
+  after(async () => { await harness?.stop(); });
 
   it('issues 2310 DATA-REQs one at a time and updates every partition', async () => {
-    using alarm = await connectAlarmSystem(fix);
-    const hb = homeBridgeFor(fix);
-    // Pima system-key status → HomeKit current state:
-    //   3=FullArmed→AWAY_ARM(1), 4=Home1→STAY_ARM(0), 5=Home2→NIGHT_ARM(2).
-    const expected = [
-      { partition: 1, accessoryName: 'Part One',   pimaStatus: 3, homekitState: 1 },
-      { partition: 2, accessoryName: 'Part Two',   pimaStatus: 4, homekitState: 0 },
-      { partition: 3, accessoryName: 'Part Three', pimaStatus: 5, homekitState: 2 },
-    ];
+    using alarm = await harness.connectAlarm();
 
-    for (const { partition, pimaStatus } of expected) {
-      const q = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition });
+    for (const { partition, pimaStatus } of cases) {
+      const q = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition.id });
       alarm.respond(q, partitionStatus({ status: pimaStatus }));
     }
 
-    for (const { accessoryName, homekitState } of expected) {
+    for (const { partition, homekitState } of cases) {
       await eventually(async () => assert.equal(
-        await hb.partition(accessoryName).currentState(),
+        await harness.homebridge.partition(partition.name).currentState(),
         homekitState,
       ));
     }
