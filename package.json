@@ -9,6 +9,10 @@
     "email": "shai.yallin@gmail.com",
     "url": "https://github.com/electricmonk"
   },
+  "funding": {
+    "type" : "paypal",
+    "url" : "https://www.paypal.me/electricmonk"
+  },    
   "homepage": "https://github.com/electricmonk/homebridge-pima-force",
   "bugs": {
     "url": "https://github.com/electricmonk/homebridge-pima-force/issues"
