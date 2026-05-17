@@ -2,6 +2,7 @@
 
 [![Downloads](https://img.shields.io/npm/dt/homebridge-pima-force.svg?color=critical)](https://www.npmjs.com/package/homebridge-pima-force)
 [![Version](https://img.shields.io/npm/v/homebridge-pima-force)](https://www.npmjs.com/package/homebridge-pima-force)
+[![verified-by-homebridge](https://img.shields.io/badge/_-verified-blueviolet?color=%23491F59&style=flat&logoColor=%23FFFFFF&logo=homebridge)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
 
 [Homebridge](https://github.com/homebridge/homebridge) plugin for the **PIMA FORCE** alarm system. Exposes each partition as a HomeKit Security System, each configured zone as a contact / motion / leak / smoke sensor, and the external siren as a switch you can flip off to mute an active alarm.
 
