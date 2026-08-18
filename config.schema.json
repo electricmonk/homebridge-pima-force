@@ -5,7 +5,12 @@
   "headerDisplay": "Homebridge plugin for the Pima FORCE alarm panel.\n\nThe alarm panel dials *out* to this plugin: configure a CMS path on the panel (Installer Code → System Configuration → CMS & Communication → Monitoring Station → CMS2/3 → Comm.Paths → Network) pointing to this Homebridge host on the port below, with Protocol set to JSON and Account ID matching the value here.",
   "schema": {
     "type": "object",
-    "required": ["name", "port", "account", "partitions"],
+    "required": [
+      "name",
+      "port",
+      "account",
+      "partitions"
+    ],
     "properties": {
       "name": {
         "title": "Plugin Name",
@@ -62,7 +67,11 @@
         "minItems": 0,
         "items": {
           "type": "object",
-          "required": ["id", "name", "userCode"],
+          "required": [
+            "id",
+            "name",
+            "userCode"
+          ],
           "properties": {
             "id": {
               "title": "Partition Number",
@@ -103,6 +112,12 @@
                   "default": true
                 }
               }
+            },
+            "exposeAccessory": {
+              "title": "Show in HomeKit",
+              "type": "boolean",
+              "default": true,
+              "description": "Uncheck to keep this partition as a credential only, with no HomeKit security-system tile. Useful for a partition that exists solely to authorise operations on its zones — e.g. a smoke-only partition whose 24-hour zones can't be suppressed by arming or disarming it anyway."
             }
           }
         }
@@ -113,7 +128,10 @@
         "description": "Each zone on the panel exposed as a HomeKit sensor. The plugin auto-populates this list on first connect by querying zone names from the panel; you only need to set the sensor type. New zones added to the panel later are appended automatically.",
         "items": {
           "type": "object",
-          "required": ["zone", "name"],
+          "required": [
+            "zone",
+            "name"
+          ],
           "properties": {
             "zone": {
               "title": "Zone Number",
@@ -131,12 +149,63 @@
               "type": "string",
               "default": "contact",
               "oneOf": [
-                { "title": "Contact (door/window)", "enum": ["contact"] },
-                { "title": "Motion", "enum": ["motion"] },
-                { "title": "Water Leak", "enum": ["leak"] },
-                { "title": "Smoke", "enum": ["smoke"] }
+                {
+                  "title": "Contact (door/window)",
+                  "enum": [
+                    "contact"
+                  ]
+                },
+                {
+                  "title": "Motion",
+                  "enum": [
+                    "motion"
+                  ]
+                },
+                {
+                  "title": "Water Leak",
+                  "enum": [
+                    "leak"
+                  ]
+                },
+                {
+                  "title": "Smoke",
+                  "enum": [
+                    "smoke"
+                  ]
+                }
               ],
               "description": "How this zone is exposed in HomeKit. The panel-side semantics are identical (active/restored); the type only affects the HomeKit icon and which automation primitives it offers."
+            },
+            "partition": {
+              "title": "Owning Partition",
+              "type": "integer",
+              "minimum": 1,
+              "description": "Partition whose user code authorises panel operations on this zone. Only needed when Bypass is enabled below — the panel filters DATA operations by user code, so the wrong code is rejected."
+            },
+            "bypass": {
+              "title": "Bypass Switch",
+              "type": "object",
+              "description": "Expose a switch that bypasses this zone. Bypass is the only way to silence a 24-hour zone (smoke and flood detectors stay armed no matter what their partition is doing) — for example to stop a kitchen smoke detector tripping while cooking.",
+              "properties": {
+                "enabled": {
+                  "title": "Expose a bypass switch",
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Adds a separate Switch accessory. ON = zone bypassed and WILL NOT ALARM."
+                },
+                "name": {
+                  "title": "Switch Name",
+                  "type": "string",
+                  "description": "Defaults to '<zone name> Bypass'."
+                },
+                "autoClearMinutes": {
+                  "title": "Auto-clear after (minutes)",
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 30,
+                  "description": "Safety net: automatically clear the bypass after this long, so a forgotten bypass doesn't leave a detector disabled. Set 0 to disable."
+                }
+              }
             }
           }
         }

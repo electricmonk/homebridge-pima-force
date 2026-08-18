@@ -17,12 +17,33 @@ import {
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
+import {
+  DEFAULT_AUTO_CLEAR_MINUTES,
+  ZoneBypassSwitch,
+  type ZoneBypassAccessoryContext,
+} from './zone-bypass-switch.js';
 import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
+
+interface ZoneBypassConfig {
+  /** Expose a bypass Switch accessory for this zone. Off by default. */
+  enabled?: boolean;
+  /** Accessory name. Defaults to `<zone name> Bypass`. */
+  name?: string;
+  /** Minutes before an active bypass clears itself. 0 disables. */
+  autoClearMinutes?: number;
+}
 
 interface ZoneConfig {
   zone: number;
   name: string;
   type?: ZoneType;
+  /**
+   * Partition whose user code authorises DATA operations on this zone.
+   * DATA is privilege-filtered per user code, so bypassing a zone requires
+   * the code of the partition that owns it. Only needed for bypass.
+   */
+  partition?: number;
+  bypass?: ZoneBypassConfig;
 }
 
 const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
@@ -37,6 +58,14 @@ interface PartitionConfigEntry {
   zones?: ZoneConfig[];
   /** Optional checkboxes for which HomeKit armed states to expose. */
   armModes?: { away?: boolean; stay?: boolean; night?: boolean };
+  /**
+   * Set false to keep the partition as a credential without giving it a
+   * HomeKit SecuritySystem tile. Useful for a partition that exists only to
+   * authorise DATA operations on its zones — e.g. a smoke-only partition
+   * whose zones are 24-hour and therefore can't be suppressed by arming or
+   * disarming it anyway. Defaults to true.
+   */
+  exposeAccessory?: boolean;
 }
 
 interface SirenConfig {
@@ -63,7 +92,11 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   requestTimeoutMs?: number;
 }
 
-type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
+type AnyContext =
+  | PartitionAccessoryContext
+  | ZoneAccessoryContext
+  | SirenAccessoryContext
+  | ZoneBypassAccessoryContext;
 
 /** Strip the `password` field from a frame before logging. */
 function redactPassword(frame: Record<string, unknown>): Record<string, unknown> {
@@ -80,6 +113,8 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   private readonly zones = new Map<number, ZoneSensor>();
   /** Output number → accessory (e.g., 1 = external siren). */
   private readonly sirens = new Map<number, SirenSwitch>();
+  /** Zone number → bypass switch, for zones with bypass enabled in config. */
+  private readonly zoneBypasses = new Map<number, ZoneBypassSwitch>();
   /** Track ids we've already info-logged so we don't spam on every event. */
   private readonly seenUnknownPartitions = new Set<number>();
   private readonly seenUnknownZones = new Set<number>();
@@ -171,12 +206,15 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       }
     });
     this.driver.on('bypass', ({ zone, partition, bypassed }) => {
-      // No HomeKit surface for bypass yet, but it must be visible in the
-      // journal: a bypassed zone is a zone that will not alarm, including
-      // 24-hour smoke and flood zones, and that's worth being able to see
-      // after the fact.
+      // CID 570 is the authoritative confirmation, and the panel emits it for
+      // keypad bypasses too — so this keeps HomeKit right regardless of who
+      // suppressed the zone.
       const name = this.zones.has(zone) ? `zone ${zone}` : `unconfigured zone ${zone}`;
       log.info(`${name} (partition ${partition}) ${bypassed ? 'BYPASSED — it will not alarm' : 'bypass cleared'}`);
+      this.zoneBypasses.get(zone)?.setBypassed(bypassed);
+      // Reflect it on the sensor too, so a suppressed detector doesn't look
+      // healthy in the Home app even when no bypass switch is exposed.
+      this.zones.get(zone)?.setBypassed(bypassed);
     });
     this.driver.on('alarm', ({ zone, partition, active }) => {
       const acc = this.partitions.get(partition);
@@ -213,6 +251,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
     api.on('didFinishLaunching', () => this.discoverDevices());
     api.on('shutdown', () => {
+      for (const b of this.zoneBypasses.values()) b.dispose();
       void this.driver.stop();
     });
   }
@@ -316,10 +355,19 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     }
 
     for (const partConfig of partitions) {
+      // A partition can be configured purely as a credential — see
+      // `exposeAccessory`. It still feeds the driver's user-code table.
+      if (partConfig.exposeAccessory === false) {
+        this.log.info(`partition ${partConfig.id} (${partConfig.name}): exposeAccessory=false — no HomeKit tile, user code still available for its zones`);
+        continue;
+      }
       desiredUuids.add(this.registerPartition(partConfig));
     }
     for (const zoneConfig of flatZones) {
       desiredUuids.add(this.registerZone(zoneConfig));
+      if (zoneConfig.bypass?.enabled) {
+        desiredUuids.add(this.registerZoneBypass(zoneConfig));
+      }
     }
 
     // Optional global siren accessory (single instance, output 1 by default).
@@ -402,6 +450,60 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     }
     this.zones.set(z.zone, new ZoneSensor(this, accessory));
     return uuid;
+  }
+
+  private registerZoneBypass(z: ZoneConfig): string {
+    const uuid = this.api.hap.uuid.generate(`pima-force:zone-bypass:${z.zone}`);
+    const name = z.bypass?.name ?? `${z.name} Bypass`;
+    const autoClearMinutes = z.bypass?.autoClearMinutes ?? DEFAULT_AUTO_CLEAR_MINUTES;
+
+    if (z.partition === undefined) {
+      // Not fatal — the driver falls back to the first configured partition's
+      // code — but DATA is privilege-filtered, so the wrong code silently
+      // can't see the zone and the write will be rejected.
+      this.log.warn(
+        `zone ${z.zone} (${z.name}) has bypass enabled but no "partition" set; `
+        + 'bypass writes are authorised per-partition and will likely be rejected. '
+        + 'Set the zone\'s owning partition in config.',
+      );
+    }
+
+    const ctx: ZoneBypassAccessoryContext = {
+      kind: 'zone-bypass',
+      zone: z.zone,
+      name,
+      partition: z.partition,
+      autoClearMinutes,
+    };
+    let accessory = this.cachedAccessories.get(uuid) as
+      | PlatformAccessory<ZoneBypassAccessoryContext>
+      | undefined;
+    if (accessory) {
+      accessory.context = ctx;
+      accessory.displayName = name;
+    } else {
+      accessory = new this.api.platformAccessory<ZoneBypassAccessoryContext>(name, uuid);
+      accessory.context = ctx;
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
+      this.log.info(`registered zone bypass switch: ${name} (zone ${z.zone})`);
+    }
+    this.zoneBypasses.set(z.zone, new ZoneBypassSwitch(this, accessory));
+    return uuid;
+  }
+
+  /**
+   * User code for a partition, used to authorise DATA operations on its
+   * zones. Falls back to the first configured partition so a mis-configured
+   * zone fails at the panel with a clear NAK rather than throwing here.
+   *
+   * Codes are read from live config on demand and deliberately never stored
+   * in `accessory.context`, which Homebridge serialises to disk.
+   */
+  userCodeForPartition(id?: number): string | undefined {
+    const partitions = this.config.partitions ?? [];
+    const match = id === undefined ? undefined : partitions.find((p) => p.id === id);
+    return (match ?? partitions[0])?.userCode;
   }
 
   /**

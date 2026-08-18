@@ -12,10 +12,19 @@ import { builderFor } from 'ts-byob';
 
 export type ZoneType = 'contact' | 'motion' | 'leak' | 'smoke';
 
+export interface ZoneBypassConfig {
+  enabled: boolean;
+  name?: string;
+  autoClearMinutes?: number;
+}
+
 export interface ZoneConfig {
   zone: number;
   name: string;
   type: ZoneType;
+  /** Partition whose user code authorises DATA operations on this zone. */
+  partition?: number;
+  bypass?: ZoneBypassConfig;
 }
 
 export interface PartitionConfig {
@@ -24,6 +33,8 @@ export interface PartitionConfig {
   userCode: string;
   /** Optional checkboxes for which HomeKit armed states to expose. */
   armModes?: { away?: boolean; stay?: boolean; night?: boolean };
+  /** False keeps the partition as a credential with no HomeKit tile. */
+  exposeAccessory?: boolean;
   /** Legacy: zones nested under a partition. Tests for the migration path use this. */
   zones?: ZoneConfig[];
 }
