@@ -138,6 +138,17 @@ it again. What we learned:
 - Payload must stay within the 250-byte DATA limit; `buildDataWrite` throws
   rather than putting an oversized frame on the wire.
 
+**Writes are NOT privilege-filtered, though reads are.** Measured 2026-08-18:
+partition 1's user code cannot see zone 13 (a partition 3 zone) in a 2149
+read at all — and bypassed it anyway, with the panel applying the change and
+emitting CID 570. So the per-partition filtering documented above for DATA-REQ
+does *not* extend to DATA writes: **any valid user code can bypass any zone**,
+including zones its partition has no visibility of.
+
+Worth knowing in both directions. Practically, a caller doesn't need to work
+out which partition owns a zone before bypassing it. Security-wise, a
+low-privilege user code is enough to disable any detector on the panel.
+
 ### System Key Status (id 2310)
 
 `1`=NotExist · `2`=Disarmed · `3`=FullArmed · `4`=Home1 · `5`=Home2 · `6`=Home3 · `7`=Home4 · `8`=Shabbat-ON · `9`=Shabbat-OFF.

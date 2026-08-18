@@ -180,7 +180,7 @@
               "title": "Owning Partition",
               "type": "integer",
               "minimum": 1,
-              "description": "Partition whose user code authorises panel operations on this zone. Only needed when Bypass is enabled below — the panel filters DATA operations by user code, so the wrong code is rejected."
+              "description": "Partition that owns this zone. Optional and informational: the panel filters parameter reads by user code but not writes, so any configured user code can bypass any zone. Setting this just picks which code the plugin sends."
             },
             "bypass": {
               "title": "Bypass Switch",

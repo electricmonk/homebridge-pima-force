@@ -194,7 +194,7 @@ Per-partition `armModes` toggles correspond to those three armed states (`away`,
 | `zone.zone`     | Zone number on the panel.                                                                                                | Yes      | —           | Integer |
 | `zone.name`     | Display name in HomeKit.                                                                                                  | Yes      | —           | String  |
 | `zone.type`     | HomeKit sensor type: `contact` (door/window), `motion`, `leak`, `smoke`. Affects only the HomeKit icon and automation primitives — the panel-side semantics are identical.       | No       | `contact`   | String  |
-| `zone.partition` | Partition whose user code authorises panel operations on this zone. Only needed when `zone.bypass` is enabled — the panel filters operations by user code, so the wrong code is rejected. | No | — | Integer |
+| `zone.partition` | Partition that owns this zone. Optional and informational — see "Zone bypass" below; any configured user code can bypass any zone. | No | — | Integer |
 | `zone.bypass`   | Expose a bypass switch for this zone — see "Zone bypass" below.                                                            | No       | disabled    | Object  |
 
 ### Zone bypass
@@ -226,7 +226,8 @@ Notes:
 - **A bypassed smoke detector is a disabled smoke detector.** The auto-clear timer exists for that reason; think carefully before setting it to `0`.
 - The zone's sensor reports `StatusActive = false` while bypassed, so a suppressed detector doesn't look healthy in the Home app.
 - Bypasses applied at the keypad show up too — the panel reports them the same way, so HomeKit stays in sync either direction.
-- `zone.partition` matters. Panel operations are authorised per user code, so bypassing a zone needs the code of the partition that owns it. If your only reason for configuring that partition is the credential, pair this with `partition.exposeAccessory: false` to skip its HomeKit tile.
+- `zone.partition` is optional. The panel filters parameter *reads* by user code but not *writes*, so any configured user code can bypass any zone — including zones whose partition that code can't otherwise see. Setting it just documents ownership and picks which code the plugin sends. (This also means a low-privilege user code is enough to disable any detector on the panel; that's the panel's design, not the plugin's.)
+- `partition.exposeAccessory: false` is for a partition you want configured but not shown — note that a partition with no accessory also has nowhere to report `ALARM_TRIGGERED`, so its alarms will only appear in the log and on the individual zone sensors.
 
 ## Features
 

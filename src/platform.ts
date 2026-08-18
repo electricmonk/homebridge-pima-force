@@ -457,17 +457,11 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     const name = z.bypass?.name ?? `${z.name} Bypass`;
     const autoClearMinutes = z.bypass?.autoClearMinutes ?? DEFAULT_AUTO_CLEAR_MINUTES;
 
-    if (z.partition === undefined) {
-      // Not fatal — the driver falls back to the first configured partition's
-      // code — but DATA is privilege-filtered, so the wrong code silently
-      // can't see the zone and the write will be rejected.
-      this.log.warn(
-        `zone ${z.zone} (${z.name}) has bypass enabled but no "partition" set; `
-        + 'bypass writes are authorised per-partition and will likely be rejected. '
-        + 'Set the zone\'s owning partition in config.',
-      );
-    }
-
+    // `partition` is optional. Measured on the live panel 2026-08-18: DATA
+    // *reads* are privilege-filtered (partition 1's code can't see zone 13 in
+    // 2149 at all) but DATA *writes* are not — partition 1's code bypassed
+    // zone 13, which belongs to partition 3, and the panel applied it. So any
+    // configured user code will do; naming the owner is just good hygiene.
     const ctx: ZoneBypassAccessoryContext = {
       kind: 'zone-bypass',
       zone: z.zone,
@@ -493,9 +487,10 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * User code for a partition, used to authorise DATA operations on its
-   * zones. Falls back to the first configured partition so a mis-configured
-   * zone fails at the panel with a clear NAK rather than throwing here.
+   * User code for a partition, used to authorise panel operations on its
+   * zones. Falls back to the first configured partition — which is a working
+   * fallback, not just a safety net: DATA writes aren't privilege-filtered
+   * (see `registerZoneBypass`), so any configured code authorises a bypass.
    *
    * Codes are read from live config on demand and deliberately never stored
    * in `accessory.context`, which Homebridge serialises to disk.

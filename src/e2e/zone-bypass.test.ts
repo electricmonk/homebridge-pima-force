@@ -136,6 +136,43 @@ describe('E2E: per-zone bypass switch', { timeout: 60_000 }, () => {
 });
 
 /**
+ * `zone.partition` is optional. Measured on the live panel 2026-08-18: DATA
+ * reads are privilege-filtered but writes are not — partition 1's code
+ * bypassed zone 13, a partition 3 zone it cannot even see in a 2149 read.
+ * So the fallback to the first configured code is a working path, not a
+ * degraded one, and a zone with no declared owner must still bypass.
+ */
+describe('E2E: bypass with no owning partition declared', { timeout: 60_000 }, () => {
+  const house = aPartition({ id: 1, name: 'House', userCode: '1111' });
+  const unowned = aZone({
+    zone: 13,
+    name: 'Unowned Smoke',
+    type: 'smoke',
+    bypass: { enabled: true, autoClearMinutes: 0 },
+  });
+
+  let harness: E2EHarness;
+  before(async () => {
+    harness = await setupE2E({
+      config: aPluginConfig({ partitions: [house], zones: [unowned], siren: { enabled: false } }),
+    });
+    await eventually(async () => {
+      const names = new Set((await harness.homebridge.listAccessories()).map((a) => a.serviceName));
+      assert.ok(names.has('Unowned Smoke Bypass'), `saw ${[...names].join(', ')}`);
+    }, { timeoutMs: 15_000 });
+  });
+  after(async () => { await harness?.stop(); });
+
+  it('falls back to the first configured user code and still writes the bypass', async () => {
+    using alarm = await harness.connectAlarm();
+    await harness.homebridge.siren('Unowned Smoke Bypass').setOn(true);
+    const write = await alarm.nextDataWrite({ id: PARAM_ID_BYPASSED_ZONES, startOrder: unowned.zone });
+    assert.deepEqual(write.parameters, ['1']);
+    assert.equal(write.password, house.userCode);
+  });
+});
+
+/**
  * A partition can exist purely to authorise operations on its zones. For a
  * smoke-only partition whose zones are 24-hour, the security-system tile is
  * actively misleading — arming or disarming it changes nothing — so it

@@ -7,8 +7,11 @@ export interface ZoneBypassAccessoryContext {
   zone: number;
   name: string;
   /**
-   * Partition whose user code authorises writes for this zone. DATA is
-   * privilege-filtered, so the wrong code simply can't see or set the zone.
+   * Partition that owns this zone, used to pick a user code. Optional: DATA
+   * *reads* are privilege-filtered but *writes* are not — measured on the
+   * live panel, partition 1's code bypassed a zone belonging to partition 3
+   * despite not being able to see that zone in a 2149 read. Any configured
+   * code works; naming the owner is hygiene, not a requirement.
    *
    * Deliberately stores the partition *id*, never the code itself —
    * `accessory.context` is serialised into Homebridge's accessory cache on
