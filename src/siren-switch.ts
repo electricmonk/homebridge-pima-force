@@ -86,11 +86,29 @@ export class SirenSwitch {
     // local state hadn't tracked the activation.
     try {
       await this.platform.driver.setOutput(this.accessory.context.output, false);
-      this.active = false;
-      this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
       this.platform.log.info(
-        `requested mute of output ${this.accessory.context.output} (de-activate-output sent to panel)`,
+        `requested mute of output ${this.accessory.context.output} `
+        + '(de-activate-output sent to panel; awaiting the panel\'s output event before changing the switch)',
       );
+      // Deliberately do NOT flip `active` here. The panel ACKs the *frame*,
+      // not the effect — while an alarm is latched it can ignore a
+      // de-activate on the siren output. Observed 2026-08-17: ACK at
+      // 19:42:08, output 1 stayed ACTIVE until 19:42:58, only releasing
+      // after a keypad disarm.
+      //
+      // Reporting Off on the ACK makes the switch lie, and a switch that
+      // already reads Off is a *dead* switch: HomeKit won't emit another SET
+      // for an unchanged value, and turning it back On is rejected by
+      // design. That is what "the siren toggle didn't respond" was. Keeping
+      // it On leaves the control live, so a second tap re-sends the mute.
+      //
+      // `setSounding()` flips us when the panel's type=770 de-activate
+      // arrives — the panel stays the source of truth.
+      if (this.active) {
+        setTimeout(() => {
+          this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, this.active);
+        }, 50);
+      }
     } catch (err) {
       this.platform.log.error(`siren mute failed: ${(err as Error).message}`);
       throw new this.platform.api.hap.HapStatusError(

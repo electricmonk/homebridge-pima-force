@@ -199,7 +199,25 @@ export class PartitionSecuritySystem {
   private async handleSetTarget(value: CharacteristicValue): Promise<void> {
     const C = this.platform.api.hap.Characteristic;
     const target = Number(value);
-    if (target === this.targetState) return;
+    // A redundant *arm* request is worth suppressing: the panel would NAK it
+    // if a zone happens to be open, surfacing a spurious "No Response" for
+    // what the user sees as a no-op.
+    //
+    // DISARM is different and must always reach the panel. It is idempotent
+    // there and doubles as the alarm acknowledgement. Smoke and flood zones
+    // on this panel are 24-hour (verified against the live panel: partition 1
+    // reads Disarmed while all twelve of its smoke/flood zones report the
+    // ARMED bit in parameter 2149), so they alarm while their partition sits
+    // at DISARM — which means TargetState already equals DISARM at the exact
+    // moment the user taps "Off" to silence it. Short-circuiting here
+    // swallowed the one command that could help: during the 2026-08-17
+    // incident not one disarm OPERATION reached the panel. Same reasoning
+    // that already makes the siren's de-activate unconditional.
+    if (target === this.targetState
+      && target !== C.SecuritySystemTargetState.DISARM
+      && !this.alarmActive) {
+      return;
+    }
     if (!this.allowedTargets.has(target)) {
       // Defense in depth — HAP's validValues should already prevent this.
       this.platform.log.warn(
@@ -225,8 +243,34 @@ export class PartitionSecuritySystem {
       if (target !== C.SecuritySystemTargetState.DISARM) this.lastArmedState = target;
       this.service.updateCharacteristic(C.SecuritySystemCurrentState, this.currentState);
     } catch (err) {
+      const reason = (err as Error).message;
+      // The panel rejects a disarm it considers a no-op. Verified against the
+      // live panel: optype 17 to an already-disarmed partition comes back as
+      // NAK "כל המדורים מנוטרלים" ("all partitions are disarmed"), and 2310
+      // confirms the partition was unchanged.
+      //
+      // Appendix D documents no such string and the vendor reserves the right
+      // to change them, so don't classify on the text — classify on our own
+      // view of the panel. If we didn't believe anything was armed, a rejected
+      // disarm changed nothing the user cares about, and raising
+      // "No Response" at them for it is the bug we set out to fix rather than
+      // a fix. A disarm rejected while we *do* believe the partition is armed
+      // is a real failure (e.g. `Remote Disarm = OFF` on the panel) and still
+      // propagates.
+      if (target === C.SecuritySystemTargetState.DISARM && this.lastArmedState === null) {
+        this.platform.log.info(
+          `partition ${this.accessory.context.id}: panel rejected a redundant disarm `
+          + `(${reason}) — nothing was armed, so treating it as satisfied`,
+        );
+        this.targetState = target;
+        if (!this.alarmActive) {
+          this.currentState = C.SecuritySystemCurrentState.DISARMED;
+        }
+        this.pushState();
+        return;
+      }
       this.platform.log.error(
-        `partition ${this.accessory.context.id} target=${target} failed: ${(err as Error).message}`,
+        `partition ${this.accessory.context.id} target=${target} failed: ${reason}`,
       );
       throw new this.platform.api.hap.HapStatusError(
         this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,

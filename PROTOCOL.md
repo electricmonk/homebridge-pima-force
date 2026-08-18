@@ -49,6 +49,24 @@ Every frame: `{frame_type, counter, account, ...}`
 Reasons (Appendix D, debug-only — vendor reserves the right to change strings):
 `Parameter Not Exist` · `Order Not Exist` · `Start-Stop Order Error` · `Parameter(s) Missing` · `Invalid JSON frame` · `Invalid Frame Type` · `Bit Error` · `Wrong User Code` · `Wrong Account ID` · `Wrong Sequence Number`.
 
+### Operational NAKs (not in Appendix D)
+
+The panel also rejects OPERATIONs it can't carry out, using **localized Hebrew
+strings that Appendix D doesn't list**. Observed on the live panel:
+
+| string | meaning | when |
+|---|---|---|
+| `סגור/בטל אזורים!` | "Close/bypass zones!" | arm (optype 12–16) refused because a zone in the partition is open — the panel is pointing at parameter 2150 as the way through |
+| `כל המדורים מנוטרלים` | "All partitions are disarmed" | disarm (optype 17) aimed at a partition already disarmed; a 2310 read either side confirms nothing changed |
+
+Both are *rejections of a no-op or of an unsatisfiable request*, not transport
+errors. **Don't surface them to the user as a command failure** — in HomeKit a
+`SERVICE_COMMUNICATION_FAILURE` renders as "No Response", which is worse than
+the no-op it's reporting. And don't classify on the text: it's undocumented and
+localized. Decide from state instead — e.g. a rejected disarm when nothing was
+believed armed changed nothing worth reporting. See `handleSetTarget` in
+`src/partition-security-system.ts`.
+
 ## OPERATION
 
 `{frame_type:"OPERATION", counter, account, password:"<PIN>", optype, opclass:1, order, partition, parameters?}`
@@ -119,6 +137,17 @@ Bit → meaning (counted across upper bytes, bit 0 of byte 1):
 `0`=SupervisionLoss · `1`=LowBattery · `2`=Short · `3`=Cut(Tamper) · `4`=Soak · `5`=Chime · `6`=AntiMask · `7`=ManualBypass · `8`=AutoBypass · `9`=Alarmed · `10`=Armed · `11`=Open · `12`=Duress · `13`=Fire · `14`=Medical · `15`=Panic.
 
 Example: `"0A0019"` → zone `0x19`=25, upper `0x0A00` has bits 9+11 → alarmed + open.
+
+**Bit 10 (Armed) identifies 24-hour zones.** Read 2149 while a partition is
+Disarmed (per 2310): any of its zones still reporting `0x0400` is armed
+around the clock. Measured on the live panel 2026-08-18 — partition 1 read
+Disarmed while all twelve of its smoke and flood zones reported `0x0400`.
+
+The consequence bites at the product level: **a 24-hour zone cannot be
+suppressed by disarming its partition**, however the partitions are named or
+organised. Such a zone will raise CID 130 on a partition the panel itself
+reports as disarmed. The only per-zone suppression is bypass (parameter
+2150) — which is exactly what the `סגור/בטל אזורים!` NAK is telling you.
 
 ### Faults (id 2250)
 
