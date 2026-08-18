@@ -3,7 +3,7 @@
 [![Downloads](https://img.shields.io/npm/dt/homebridge-pima-force.svg?color=critical)](https://www.npmjs.com/package/homebridge-pima-force)
 [![Version](https://img.shields.io/npm/v/homebridge-pima-force)](https://www.npmjs.com/package/homebridge-pima-force)
 
-[Homebridge](https://github.com/homebridge/homebridge) plugin for the **PIMA FORCE** alarm system. Exposes each partition as a HomeKit Security System, each configured zone as a contact / motion / leak / smoke sensor, and the external siren as a switch you can flip off to mute an active alarm.
+[Homebridge](https://github.com/homebridge/homebridge) plugin for the **PIMA FORCE** alarm system. Exposes each partition as a HomeKit Security System, each configured zone as a contact / motion / leak / smoke sensor, and the external siren as a switch you can flip off to mute an active alarm. Zones can optionally get a bypass switch — the only way to silence a 24-hour detector, e.g. so cooking doesn't trip the kitchen smoke alarm.
 
 ### Requirements
 
@@ -108,7 +108,7 @@ The plugin appended a `zones` block. You can adjust each zone's `type` here (or 
 
 #### Advanced config (all features)
 
-Multiple partitions with per-partition `armModes`, an explicit siren block, and `debug` enabled. Zones are still auto-discovered — you only customize `type` after the fact.
+Multiple partitions with per-partition `armModes`, an explicit siren block, a credential-only partition, and a bypassable smoke zone. Zones are still auto-discovered — you customize `type` and any `bypass` after the fact.
 
 ```json
 "platforms": [
@@ -135,11 +135,29 @@ Multiple partitions with per-partition `armModes`, an explicit siren block, and 
         "name": "Garage",
         "userCode": "5678",
         "armModes": { "away": true, "stay": false, "night": false }
+      },
+      {
+        "id": 3,
+        "name": "Smoke Partition",
+        "userCode": "9012",
+        "exposeAccessory": false
+      }
+    ],
+    "zones": [
+      { "zone": 1, "name": "Front Door", "type": "contact" },
+      {
+        "zone": 3,
+        "name": "Kitchen Smoke",
+        "type": "smoke",
+        "partition": 3,
+        "bypass": { "enabled": true, "autoClearMinutes": 30 }
       }
     ]
   }
 ]
 ```
+
+Partition 3 above is configured but not shown in HomeKit — see `partition.exposeAccessory`. Zone 3 gets a `Kitchen Smoke Bypass` switch that clears itself after 30 minutes; see "Zone bypass" below for why a smoke zone needs one.
 
 ## Configuration Parameters
 
