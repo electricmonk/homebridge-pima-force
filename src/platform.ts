@@ -346,6 +346,21 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   }
 
   private discoverDevices(): void {
+    const desiredUuids = this.registerConfiguredAccessories();
+    this.pruneStaleAccessories(desiredUuids);
+
+    if ((this.config.partitions ?? []).length === 0) {
+      this.log.warn('No partitions configured — not starting driver. Open the plugin settings to add at least one partition.');
+      return;
+    }
+
+    this.driver.start().catch((err) => {
+      this.log.error(`failed to start driver: ${(err as Error).message}`);
+    });
+  }
+
+  /** Register every accessory the config asks for; returns their UUIDs. */
+  private registerConfiguredAccessories(): Set<string> {
     const partitions = this.config.partitions ?? [];
     const desiredUuids = new Set<string>();
 
@@ -377,25 +392,19 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       desiredUuids.add(this.registerSiren(sirenCfg.name ?? DEFAULT_SIREN_NAME));
     }
 
-    // Unregister any cached accessories no longer in config.
+    return desiredUuids;
+  }
+
+  /** Unregister cached accessories that config no longer asks for. */
+  private pruneStaleAccessories(desiredUuids: Set<string>): void {
     const stale: PlatformAccessory<AnyContext>[] = [];
     for (const [uuid, acc] of this.cachedAccessories) {
       if (!desiredUuids.has(uuid)) stale.push(acc);
     }
-    if (stale.length > 0) {
-      this.log.info(`removing ${stale.length} stale accessory(ies): ${stale.map(a => a.displayName).join(', ')}`);
-      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
-      for (const acc of stale) this.cachedAccessories.delete(acc.UUID);
-    }
-
-    if (partitions.length === 0) {
-      this.log.warn('No partitions configured — not starting driver. Open the plugin settings to add at least one partition.');
-      return;
-    }
-
-    this.driver.start().catch((err) => {
-      this.log.error(`failed to start driver: ${(err as Error).message}`);
-    });
+    if (stale.length === 0) return;
+    this.log.info(`removing ${stale.length} stale accessory(ies): ${stale.map(a => a.displayName).join(', ')}`);
+    this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
+    for (const acc of stale) this.cachedAccessories.delete(acc.UUID);
   }
 
   private registerPartition(p: PartitionConfigEntry): string {

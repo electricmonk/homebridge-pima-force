@@ -281,6 +281,41 @@ await driver.start();
 log(`listening on 0.0.0.0:${PORT} | account=${ACCOUNT} | encoding=${ENCODING}${REVERSE_STRINGS ? ' (reversed)' : ''} | partitions=[${partitions.map(p => p.id).join(',')}]${debug ? ' | DEBUG' : ''}`);
 log('Commands: arm <partition> [mode] | disarm <partition> | output activate|deactivate <N> | siren on|off | bypass <zone> on|off / bypass status | zones count|names [start [stop]] | req <id> <start> [stop] | debug on|off | status | quit');
 
+/**
+ * `bypass <zone> on|off [pw]` / `bypass status [start [stop [pw]]]`.
+ *
+ * Bypass is the only per-zone suppression the panel offers and the only
+ * thing that quiets a 24-hour zone — smoke and flood zones stay armed no
+ * matter what their partition is doing.
+ *
+ * Lives outside the readline switch on purpose: that handler is already an
+ * oversized command dispatcher, and adding to it inline makes an existing
+ * hotspot worse.
+ */
+async function bypassCommand(rest: string[]): Promise<void> {
+  const action = rest[0];
+  if (action === 'status') {
+    const start = Number(rest[1] ?? 1);
+    const stop = rest[2] !== undefined ? Number(rest[2]) : undefined;
+    log(`>> read bypass state (2150) ${start}${stop !== undefined ? `-${stop}` : '+'}`);
+    const res = await driver.getZoneBypass(start, stop, rest[3]);
+    logDataResponse(2150, start, res.parameters, res.more);
+    // Reading 2150 back is not a reliable mirror — it came back empty even
+    // with a zone actively bypassed. 2149 bit 7 is authoritative.
+    log('   note: 2150 reads are unreliable; confirm with `req 2149 1 144` (bit 7 = ManualBypass)');
+    return;
+  }
+  const zone = Number(action);
+  const state = rest[1];
+  if (!zone || (state !== 'on' && state !== 'off')) {
+    log('usage: bypass <zone> on|off [pw]  |  bypass status [start [stop [pw]]]');
+    return;
+  }
+  log(`>> bypass zone ${zone} ${state}`);
+  await driver.setZoneBypass(zone, state === 'on', { password: rest[2] });
+  log('   panel accepted the write — confirm with: req 2149 1 144  (bit 7 = ManualBypass)');
+}
+
 const rl = readline.createInterface({ input: process.stdin });
 
 rl.on('line', async (line) => {
@@ -321,30 +356,8 @@ rl.on('line', async (line) => {
         await driver.setOutput(1, action === 'on');
         return;
       }
-      case 'bypass': {
-        // The only per-zone suppression the panel offers, and the only thing
-        // that quiets a 24-hour zone (smoke/flood stay armed no matter what
-        // their partition is doing).
-        const action = rest[0];
-        if (action === 'status') {
-          const start = Number(rest[1] ?? 1);
-          const stop = rest[2] !== undefined ? Number(rest[2]) : undefined;
-          const pw = rest[3];
-          log(`>> read bypass state (2150) ${start}${stop !== undefined ? `-${stop}` : '+'}`);
-          const res = await driver.getZoneBypass(start, stop, pw);
-          logDataResponse(2150, start, res.parameters, res.more);
-          return;
-        }
-        const zone = Number(action);
-        const state = rest[1];
-        if (!zone || (state !== 'on' && state !== 'off')) {
-          return log('usage: bypass <zone> on|off [pw]  |  bypass status [start [stop [pw]]]');
-        }
-        log(`>> bypass zone ${zone} ${state}`);
-        await driver.setZoneBypass(zone, state === 'on', { password: rest[2] });
-        log(`   panel accepted the write — confirm with: req 2149 1 144  (bit 7 = ManualBypass)`);
-        return;
-      }
+      case 'bypass':
+        return bypassCommand(rest);
       case 'zones': {
         const action = rest[0];
         if (action === 'count') {

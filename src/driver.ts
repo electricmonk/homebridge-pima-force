@@ -176,18 +176,32 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * in `src/pagination.ts` for the canonical loop.
    */
   requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
-    const part = this.config.partitions[0];
-    if (!part && !params.password) {
-      return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
-    }
+    const password = this.resolvePassword(params.password, 'DATA-REQ');
+    if (password instanceof Error) return Promise.reject(password);
     return this.transport.send({
       kind: 'data-req',
       account: this.config.account,
-      password: params.password ?? part!.userCode,
+      password,
       id: params.id,
       startOrder: params.startOrder,
       stopOrder: params.stopOrder,
     }).then((frame) => this.toDataResponse(frame));
+  }
+
+  /**
+   * User code to authenticate a DATA operation with: the caller's explicit
+   * one, else the first configured partition's.
+   *
+   * Returns the Error rather than throwing so the callers stay
+   * promise-returning — they're async APIs and a synchronous throw would be
+   * a surprise. `undefined` is not a valid outcome; the panel rejects
+   * unauthenticated DATA.
+   */
+  private resolvePassword(explicit: string | undefined, what: string): string | Error {
+    if (explicit !== undefined) return explicit;
+    const part = this.config.partitions[0];
+    if (!part) return new Error(`no partition configured to derive a user code for ${what}`);
+    return part.userCode;
   }
 
   /**
@@ -198,14 +212,12 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * throws rather than let an over-long frame reach the wire.
    */
   writeData(params: { id: number; startOrder: number; parameters: string[]; password?: string }): Promise<PanelFrame> {
-    const part = this.config.partitions[0];
-    if (!part && !params.password) {
-      return Promise.reject(new Error('no partition configured to derive a user code for DATA write'));
-    }
+    const password = this.resolvePassword(params.password, 'DATA write');
+    if (password instanceof Error) return Promise.reject(password);
     return this.transport.send({
       kind: 'data-write',
       account: this.config.account,
-      password: params.password ?? part!.userCode,
+      password,
       id: params.id,
       startOrder: params.startOrder,
       parameters: params.parameters,
@@ -220,9 +232,10 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * regardless of their partition's arm state, so disarming the partition
    * they sit on does nothing for them. Verified on a live panel 2026-08-18.
    *
-   * Authorization uses the user code of the partition owning the zone when
-   * given; DATA responses are privilege-filtered, so the wrong code will
-   * simply be rejected.
+   * Any configured user code authorises this. DATA *reads* are
+   * privilege-filtered but writes are not — measured on the live panel,
+   * partition 1's code bypassed a partition 3 zone it cannot even see in a
+   * 2149 read. Pass the owning partition's code by preference anyway.
    */
   setZoneBypass(zone: number, bypassed: boolean, opts: { password?: string } = {}): Promise<void> {
     if (!Number.isInteger(zone) || zone < 1) {
