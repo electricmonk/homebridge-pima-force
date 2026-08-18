@@ -175,32 +175,30 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * responsible for issuing the follow-up request. See `paginateDataResponse`
    * in `src/pagination.ts` for the canonical loop.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
-    const password = this.resolvePassword(params.password, 'DATA-REQ');
-    if (password instanceof Error) return Promise.reject(password);
-    return this.transport.send({
+  async requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
+    const frame = await this.transport.send({
       kind: 'data-req',
       account: this.config.account,
-      password,
+      password: this.passwordFor(params.password, 'DATA-REQ'),
       id: params.id,
       startOrder: params.startOrder,
       stopOrder: params.stopOrder,
-    }).then((frame) => this.toDataResponse(frame));
+    });
+    return this.toDataResponse(frame);
   }
 
   /**
    * User code to authenticate a DATA operation with: the caller's explicit
    * one, else the first configured partition's.
    *
-   * Returns the Error rather than throwing so the callers stay
-   * promise-returning — they're async APIs and a synchronous throw would be
-   * a surprise. `undefined` is not a valid outcome; the panel rejects
-   * unauthenticated DATA.
+   * Throws when neither is available. Callers are `async`, so the throw
+   * surfaces as a rejected promise like every other failure on these paths —
+   * no synchronous surprise despite happening before the first await.
    */
-  private resolvePassword(explicit: string | undefined, what: string): string | Error {
+  private passwordFor(explicit: string | undefined, what: string): string {
     if (explicit !== undefined) return explicit;
     const part = this.config.partitions[0];
-    if (!part) return new Error(`no partition configured to derive a user code for ${what}`);
+    if (!part) throw new Error(`no partition configured to derive a user code for ${what}`);
     return part.userCode;
   }
 
@@ -211,13 +209,11 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * Payload must fit the panel's 250-byte DATA limit — `buildDataWrite`
    * throws rather than let an over-long frame reach the wire.
    */
-  writeData(params: { id: number; startOrder: number; parameters: string[]; password?: string }): Promise<PanelFrame> {
-    const password = this.resolvePassword(params.password, 'DATA write');
-    if (password instanceof Error) return Promise.reject(password);
+  async writeData(params: { id: number; startOrder: number; parameters: string[]; password?: string }): Promise<PanelFrame> {
     return this.transport.send({
       kind: 'data-write',
       account: this.config.account,
-      password,
+      password: this.passwordFor(params.password, 'DATA write'),
       id: params.id,
       startOrder: params.startOrder,
       parameters: params.parameters,

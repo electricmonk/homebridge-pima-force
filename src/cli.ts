@@ -307,7 +307,8 @@ async function bypassCommand(rest: string[]): Promise<void> {
   }
   const zone = Number(action);
   const state = rest[1];
-  if (!zone || (state !== 'on' && state !== 'off')) {
+  const isToggle = state === 'on' || state === 'off';
+  if (!zone || !isToggle) {
     log('usage: bypass <zone> on|off [pw]  |  bypass status [start [stop [pw]]]');
     return;
   }
