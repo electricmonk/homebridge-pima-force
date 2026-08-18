@@ -1,3 +1,9 @@
+## [0.1.22](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.21...v0.1.22) (2026-08-18)
+
+### Bug Fixes
+
+* revive the dead HomeKit controls from the 2026-08-17 alarm, and add zone bypass ([#26](https://github.com/electricmonk/homebridge-pima-force/issues/26)) ([2b7e3a7](https://github.com/electricmonk/homebridge-pima-force/commit/2b7e3a7f21ef9f75f90718ffc4fdd7a4af141e29))
+
 ## [0.1.21](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.20...v0.1.21) (2026-05-17)
 
 ## [0.1.20](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.19...v0.1.20) (2026-05-17)
