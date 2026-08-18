@@ -46,6 +46,17 @@ export interface AlarmOperation extends Record<string, unknown> {
   password?: string;
 }
 
+/** An HA→AS `DATA` config write as observed by the test. */
+export interface AlarmDataWrite extends Record<string, unknown> {
+  frame_type: 'DATA';
+  counter: number;
+  account: string | number;
+  id: number;
+  start_order: number;
+  parameters: string[];
+  password?: string;
+}
+
 export interface AlarmSystemOptions {
   host?: string;
   port: number;
@@ -75,8 +86,12 @@ export interface AlarmSystem extends Disposable {
   readonly dataReqs: ReadonlyArray<AlarmQuery>;
   /** Subset of `received`: just OPERATION frames. */
   readonly operations: ReadonlyArray<AlarmOperation>;
-  /** Toggle auto-ACK of OPERATIONs (default true — mirrors the real panel). */
-  readonly autoAck: { operations: boolean };
+  /** Subset of `received`: just HA→AS DATA config writes. */
+  readonly dataWrites: ReadonlyArray<AlarmDataWrite>;
+  /** Resolve with the next DATA write matching `match`, after this call. */
+  nextDataWrite(match?: { id?: number; startOrder?: number }, opts?: { timeoutMs?: number }): Promise<AlarmDataWrite>;
+  /** Toggle auto-ACK of OPERATIONs and DATA writes (default true — mirrors the real panel). */
+  readonly autoAck: { operations: boolean; dataWrites: boolean };
   /** Toggle auto-NAK of racing DATA-REQs (default true — mirrors the real panel). */
   readonly autoReject: { racingDataReqs: boolean };
   /** Send a raw frame — escape hatch for tests that need to bypass the builders. */
@@ -91,12 +106,13 @@ export function anAlarmSystem(opts: AlarmSystemOptions): AlarmSystem {
   const received: Array<Record<string, unknown>> = [];
   const dataReqs: AlarmQuery[] = [];
   const operations: AlarmOperation[] = [];
+  const dataWrites: AlarmDataWrite[] = [];
   /** Counter of the DATA-REQ whose response we haven't sent yet (null = no in-flight). */
   let inflightQueryCounter: number | null = null;
   let reportCounter = opts.reportCounterStart ?? 1;
   let connected = false;
 
-  const autoAck = { operations: true };
+  const autoAck = { operations: true, dataWrites: true };
   const autoReject = { racingDataReqs: true };
 
   const write = (frame: Record<string, unknown>): void => {
@@ -131,6 +147,19 @@ export function anAlarmSystem(opts: AlarmSystemOptions): AlarmSystem {
       if (frame.frame_type === 'OPERATION') {
         operations.push(frame as AlarmOperation);
         if (autoAck.operations) {
+          write({
+            frame_type: 'ACK',
+            counter: frame.counter,
+            account: accountString,
+          });
+        }
+        continue;
+      }
+      if (frame.frame_type === 'DATA') {
+        // HA→AS DATA is a *config write* (e.g. zone bypass, parameter 2150),
+        // not a response. The real panel acknowledges it; mirror that.
+        dataWrites.push(frame as AlarmDataWrite);
+        if (autoAck.dataWrites) {
           write({
             frame_type: 'ACK',
             counter: frame.counter,
@@ -237,6 +266,18 @@ export function anAlarmSystem(opts: AlarmSystemOptions): AlarmSystem {
       throw new Error(`no OPERATION matching ${JSON.stringify(match)}; seen ${operations.length}: ${JSON.stringify(operations)}`);
     }, { timeoutMs: pollOpts.timeoutMs ?? 2000, message: `awaiting OPERATION ${JSON.stringify(match)}` });
 
+  const nextDataWrite = (
+    match: { id?: number; startOrder?: number } = {},
+    pollOpts: { timeoutMs?: number } = {},
+  ): Promise<AlarmDataWrite> =>
+    eventually(() => {
+      const found = dataWrites.find((w) =>
+        (match.id === undefined || Number(w.id) === match.id)
+        && (match.startOrder === undefined || Number(w.start_order) === match.startOrder));
+      if (found) return found;
+      throw new Error(`no DATA write matching ${JSON.stringify(match)}; seen ${dataWrites.length}: ${JSON.stringify(dataWrites)}`);
+    }, { timeoutMs: pollOpts.timeoutMs ?? 2000, message: `awaiting DATA write ${JSON.stringify(match)}` });
+
   const respond = (query: AlarmQuery, payload: DataPayload): void => {
     if (inflightQueryCounter === Number(query.counter)) {
       inflightQueryCounter = null;
@@ -276,6 +317,8 @@ export function anAlarmSystem(opts: AlarmSystemOptions): AlarmSystem {
     report,
     nextQuery,
     nextOperation,
+    nextDataWrite,
+    dataWrites,
     respond,
     reject: reject_,
     received,

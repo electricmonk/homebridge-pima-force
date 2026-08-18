@@ -108,10 +108,35 @@ Parameters (Appendix C):
 | 411 | User Name | user 1–144 | str |
 | 2148 | Number of installed zones | 0 | num |
 | 2149 | Zone Status | — | hex bitfield (below) |
-| 2150 | Bypass (read & write) | zone# | `"1"`=bypass, `"0"`=clear |
+| 2150 | Bypass (write; see below) | zone# | `"1"`=bypass, `"0"`=clear |
 | 2250 | Faults | — | hex (below) |
 | 2301 | Sirens / Outputs status | 1–2 sirens, 34–41 outputs | bitfield |
 | 2310 | System Key Status | partition 1–16 | num |
+
+### Writing a parameter (HA→AS DATA) — verified for zone bypass (2150)
+
+A config write is an HA→AS `DATA` frame. Field order mirrors DATA-REQ, with
+`parameters` appended (one entry per order, starting at `start_order`):
+
+```json
+{"frame_type":"DATA","counter":42,"account":1234,"password":"1111","id":2150,"start_order":13,"parameters":["1"]}
+```
+
+Confirmed against a live panel on 2026-08-18 — bypassing zone 13 and clearing
+it again. What we learned:
+
+- The panel **accepts and applies** the write. `"1"` bypasses, `"0"` clears.
+- It **acknowledges** the write, then emits **CID 570** (`qualifier` 1 =
+  bypassed, 3 = cleared) carrying the zone and partition — the same event a
+  keypad bypass produces. Treat 570 as the confirmation, not the ACK.
+- Verify the effect via **2149 bit 7 (ManualBypass)**, not via a 2150 read:
+  reading 2150 over `start_order` 1–24 returned an **empty** array both before
+  and during an active bypass, so the read side is not a reliable mirror.
+- **Bypassing clears the Armed bit.** Zone 13 went `0x0400` (Armed) →
+  `0x0080` (ManualBypass) → `0x0400` again on clear. This is why bypass is the
+  only thing that suppresses a 24-hour zone.
+- Payload must stay within the 250-byte DATA limit; `buildDataWrite` throws
+  rather than putting an oversized frame on the wire.
 
 ### System Key Status (id 2310)
 
@@ -295,7 +320,7 @@ Empty `parameters: []` ⇒ no faults. `"more":"yes"` ⇒ paginate.
 | 421 | Access denied (invalid code / outside time window) | 0 |
 | 441 | Home-X / Shabbat arm | 0=master, N=user (q=3) |
 | 454 | Inactivity | 0 |
-| 570 | Bypass / unbypass | zone# |
+| **570** | **Bypass / unbypass** (q=1 bypassed, q=3 cleared) — keypad *and* CMS 2150 writes | zone# |
 | 601 | Manual test (installer) | 0 |
 | 602 | Auto periodic test | 0 |
 | 625 | Time/Date changed | 0 |

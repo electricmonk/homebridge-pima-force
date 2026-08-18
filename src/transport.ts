@@ -4,9 +4,12 @@ import {
   ackFrame,
   buildAck,
   buildDataReq,
+  buildDataWrite,
   buildOperation,
   dataReqFrame,
   type DataReqParams,
+  dataWriteFrame,
+  type DataWriteParams,
   operationFrame,
   type OperationParams,
   parseFrames,
@@ -52,8 +55,9 @@ export interface PimaTransportConfig {
  * Callers never see the counter — it's allocated inside the wire queue.
  */
 export type OutboundRequest =
-  | ({ kind: 'operation' } & Omit<OperationParams, 'counter'>)
-  | ({ kind: 'data-req'  } & Omit<DataReqParams,  'counter'>);
+  | ({ kind: 'operation'  } & Omit<OperationParams,  'counter'>)
+  | ({ kind: 'data-req'   } & Omit<DataReqParams,    'counter'>)
+  | ({ kind: 'data-write' } & Omit<DataWriteParams,  'counter'>);
 
 export interface PimaTransportEvents {
   connected: [];
@@ -281,6 +285,31 @@ export class PimaTransport extends EventEmitter<PimaTransportEvents> {
         frameObj: operationFrame(params),
         bytes: buildOperation(params),
         match: (f) => f.frame_type === 'ACK' && Number(f.counter) === counter,
+      };
+    }
+    if (request.kind === 'data-write') {
+      const params: DataWriteParams = {
+        account: request.account,
+        counter,
+        password: request.password,
+        id: request.id,
+        startOrder: request.startOrder,
+        parameters: request.parameters,
+      };
+      const expectedId = request.id;
+      const expectedStart = request.startOrder;
+      return {
+        frameObj: dataWriteFrame(params),
+        bytes: buildDataWrite(params),
+        // The spec doesn't say how the panel acknowledges a config write, and
+        // we've no capture of one. Accept either shape: a counter-matched ACK
+        // (as OPERATION gets) or an echoed DATA for the same id+start_order
+        // (as DATA-REQ gets). A NAK still rejects via the counter path.
+        match: (f) =>
+          (f.frame_type === 'ACK' && Number(f.counter) === counter)
+          || (f.frame_type === 'DATA'
+            && Number(f.id) === expectedId
+            && Number(f.start_order) === expectedStart),
       };
     }
     const params: DataReqParams = {

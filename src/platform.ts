@@ -170,6 +170,14 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         this.noteUnknownOutput(output, partition, active);
       }
     });
+    this.driver.on('bypass', ({ zone, partition, bypassed }) => {
+      // No HomeKit surface for bypass yet, but it must be visible in the
+      // journal: a bypassed zone is a zone that will not alarm, including
+      // 24-hour smoke and flood zones, and that's worth being able to see
+      // after the fact.
+      const name = this.zones.has(zone) ? `zone ${zone}` : `unconfigured zone ${zone}`;
+      log.info(`${name} (partition ${partition}) ${bypassed ? 'BYPASSED — it will not alarm' : 'bypass cleared'}`);
+    });
     this.driver.on('alarm', ({ zone, partition, active }) => {
       const acc = this.partitions.get(partition);
       if (acc) {

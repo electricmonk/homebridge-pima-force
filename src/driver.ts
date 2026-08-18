@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   EVENT_TYPE_BURGLARY,
+  EVENT_TYPE_BYPASS,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
   EVENT_TYPE_OUTPUT,
@@ -15,6 +16,7 @@ import {
   OPTYPE_ARM_SHABBAT,
   OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
+  PARAM_ID_BYPASSED_ZONES,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
   PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
@@ -188,6 +190,57 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
     }).then((frame) => this.toDataResponse(frame));
   }
 
+  /**
+   * Write a configuration parameter (HA→AS `DATA`). The read counterpart is
+   * {@link requestData}. See {@link arm} for settlement semantics.
+   *
+   * Payload must fit the panel's 250-byte DATA limit — `buildDataWrite`
+   * throws rather than let an over-long frame reach the wire.
+   */
+  writeData(params: { id: number; startOrder: number; parameters: string[]; password?: string }): Promise<PanelFrame> {
+    const part = this.config.partitions[0];
+    if (!part && !params.password) {
+      return Promise.reject(new Error('no partition configured to derive a user code for DATA write'));
+    }
+    return this.transport.send({
+      kind: 'data-write',
+      account: this.config.account,
+      password: params.password ?? part!.userCode,
+      id: params.id,
+      startOrder: params.startOrder,
+      parameters: params.parameters,
+    });
+  }
+
+  /**
+   * Bypass or un-bypass a single zone (parameter 2150).
+   *
+   * This is the only per-zone suppression the panel offers, and the only
+   * thing that silences a **24-hour** zone — smoke and flood zones stay armed
+   * regardless of their partition's arm state, so disarming the partition
+   * they sit on does nothing for them. Verified on a live panel 2026-08-18.
+   *
+   * Authorization uses the user code of the partition owning the zone when
+   * given; DATA responses are privilege-filtered, so the wrong code will
+   * simply be rejected.
+   */
+  setZoneBypass(zone: number, bypassed: boolean, opts: { password?: string } = {}): Promise<void> {
+    if (!Number.isInteger(zone) || zone < 1) {
+      return Promise.reject(new Error(`invalid zone number: ${zone}`));
+    }
+    return this.writeData({
+      id: PARAM_ID_BYPASSED_ZONES,
+      startOrder: zone,
+      parameters: [bypassed ? '1' : '0'],
+      password: opts.password,
+    }).then(() => undefined);
+  }
+
+  /** Read the bypass state of a zone range (parameter 2150). */
+  getZoneBypass(startOrder = 1, stopOrder?: number, password?: string): Promise<DataResponse> {
+    return this.requestData({ id: PARAM_ID_BYPASSED_ZONES, startOrder, stopOrder, password });
+  }
+
   /** Convenience: request the panel's zone names (parameter id 260). */
   getZoneNames(startOrder = 1, stopOrder?: number): Promise<DataResponse> {
     return this.requestData({ id: PARAM_ID_ZONE_NAMES, startOrder, stopOrder });
@@ -323,6 +376,18 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
         return;
       }
       this.emit('output', { output, partition, active: qualifier === QUALIFIER_NEW });
+      return;
+    }
+
+    if (type === EVENT_TYPE_BYPASS) {
+      const zone = Number(frame.zone ?? 0);
+      if (!zone) {
+        this.emit('unknown', frame);
+        return;
+      }
+      // q=1 bypassed, q=3 cleared. The panel emits this for keypad bypasses
+      // too, so it's how we learn about suppression we didn't initiate.
+      this.emit('bypass', { zone, partition, bypassed: qualifier === QUALIFIER_NEW });
       return;
     }
 

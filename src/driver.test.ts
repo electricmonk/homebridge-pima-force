@@ -23,6 +23,8 @@ import {
   disarmedFromRemote,
   nakWithReason,
   partitionStatus,
+  zoneBypassCleared,
+  zoneBypassed,
   zoneClosed,
   zoneCount,
   zoneNames,
@@ -193,6 +195,37 @@ describe('PimaDriver — receive side', () => {
     assert.deepEqual(event, { partition: 1, source: 'local' });
   });
 
+  it('emits bypass when a zone is bypassed (CID 570 q=1)', async () => {
+    // Captured from the live panel while writing parameter 2150:
+    //   {"type":570,"qualifier":1,"zone":13,"partition":3}
+    // Before this was handled the driver logged it as an unknown frame, so a
+    // zone suppressed at the keypad was invisible to us.
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+    const next = once(driver, 'bypass');
+    await alarm.report(zoneBypassed({ zone: 13, partition: 3 }));
+    const [event] = await next;
+    assert.deepEqual(event, { zone: 13, partition: 3, bypassed: true });
+  });
+
+  it('emits bypass with bypassed=false when the bypass is cleared (CID 570 q=3)', async () => {
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+    const next = once(driver, 'bypass');
+    await alarm.report(zoneBypassCleared({ zone: 13, partition: 3 }));
+    const [event] = await next;
+    assert.deepEqual(event, { zone: 13, partition: 3, bypassed: false });
+  });
+
+  it('emits unknown for a 570 with no zone number', async () => {
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+    const next = once(driver, 'unknown');
+    await alarm.report(zoneBypassed({ zone: 0, partition: 3 }));
+    const [frame] = await next;
+    assert.equal(Number(frame.type), 570);
+  });
+
   it('emits unknown for unrecognized event types', async () => {
     await using driver = await setupDriver();
     using alarm = await connectAlarm(driver);
@@ -232,6 +265,35 @@ describe('PimaDriver — send side (arm/disarm)', () => {
     assert.equal(op.opclass, 1);
     assert.equal(op.order, 0);
     assert.equal(op.account, 1234);
+  });
+
+  it('setZoneBypass() writes parameter 2150 for the zone and settles on the panel ACK', async () => {
+    // Bypass is the only per-zone suppression the panel offers, and the only
+    // thing that quiets a 24-hour zone (smoke/flood ignore partition state).
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+
+    await driver.setZoneBypass(13, true, { password: '2222' });
+    const on = await alarm.nextDataWrite({ id: 2150, startOrder: 13 });
+    assert.equal(on.frame_type, 'DATA');
+    assert.deepEqual(on.parameters, ['1']);
+    assert.equal(on.password, '2222');
+    assert.equal(on.account, 1234);
+
+    await driver.setZoneBypass(13, false, { password: '2222' });
+    const off = await eventually(() => {
+      const found = alarm.dataWrites.filter((w) => Number(w.start_order) === 13 && w.parameters[0] === '0');
+      if (!found.length) throw new Error('no bypass-clear write yet');
+      return found[0];
+    });
+    assert.deepEqual(off.parameters, ['0']);
+  });
+
+  it('setZoneBypass() rejects a nonsense zone number without touching the wire', async () => {
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+    await assert.rejects(() => driver.setZoneBypass(0, true), /invalid zone number/);
+    assert.equal(alarm.dataWrites.length, 0);
   });
 
   it('disarm() uses the partition\'s user code and a fresh counter', async () => {

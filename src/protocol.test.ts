@@ -3,10 +3,13 @@ import { describe, it } from 'node:test';
 import {
   buildAck,
   buildDataReq,
+  buildDataWrite,
   buildOperation,
   dataReqFrame,
+  dataWriteFrame,
   OPTYPE_ARM,
   OPTYPE_DISARM,
+  PARAM_ID_BYPASSED_ZONES,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
   PARAM_ID_ZONE_NAMES,
   parseFrame,
@@ -174,6 +177,53 @@ describe('dataReqFrame / buildDataReq', () => {
     assert.equal(obj.stop_order, undefined);
     assert.equal(obj.id, PARAM_ID_NUMBER_OF_INSTALLED_ZONES);
     assert.equal(obj.start_order, 1);
+  });
+});
+
+describe('dataWriteFrame / buildDataWrite', () => {
+  it('serializes a zone-bypass write with DATA-REQ field ordering plus parameters', () => {
+    const buf = buildDataWrite({
+      account: 1234,
+      counter: 42,
+      password: '1111',
+      id: PARAM_ID_BYPASSED_ZONES,
+      startOrder: 13,
+      parameters: ['1'],
+    });
+    assert.equal(
+      buf.toString('utf8'),
+      '{"frame_type":"DATA","counter":42,"account":1234,"password":"1111","id":2150,"start_order":13,"parameters":["1"]}',
+    );
+  });
+
+  it('clears a bypass with "0"', () => {
+    const obj = dataWriteFrame({
+      account: 1234,
+      counter: 43,
+      password: '1111',
+      id: PARAM_ID_BYPASSED_ZONES,
+      startOrder: 13,
+      parameters: ['0'],
+    });
+    assert.deepEqual(obj.parameters, ['0']);
+    assert.equal(obj.frame_type, 'DATA');
+    assert.equal(obj.start_order, 13);
+  });
+
+  it('refuses to build a payload over the panel 250-byte DATA limit', () => {
+    // The panel silently misbehaves on oversized DATA rather than NAKing
+    // cleanly, so fail loudly on our side instead of putting it on the wire.
+    assert.throws(
+      () => buildDataWrite({
+        account: 1234,
+        counter: 1,
+        password: '1111',
+        id: PARAM_ID_BYPASSED_ZONES,
+        startOrder: 1,
+        parameters: Array.from({ length: 144 }, () => '1'),
+      }),
+      /over the panel's 250-byte limit/,
+    );
   });
 });
 

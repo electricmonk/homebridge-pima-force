@@ -13,6 +13,7 @@
 import { builderFor } from 'ts-byob';
 import {
   EVENT_TYPE_BURGLARY,
+  EVENT_TYPE_BYPASS,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
   EVENT_TYPE_OUTPUT,
@@ -100,6 +101,18 @@ export const sirenDeactivated = (o: { partition: number; output?: number } = { p
     partition: o.partition,
     zone: o.output ?? OUTPUT_EXTERNAL_SIREN,
   });
+
+/**
+ * Zone bypassed (CID 570 qualifier 1). The panel emits this whether the
+ * bypass came from the keypad or from a CMS write to parameter 2150 —
+ * captured verbatim from the live panel on 2026-08-18.
+ */
+export const zoneBypassed = (o: { zone: number; partition: number }): EventBlueprint =>
+  event({ type: EVENT_TYPE_BYPASS, qualifier: QUALIFIER_NEW, ...o });
+
+/** Zone bypass cleared (CID 570 qualifier 3). */
+export const zoneBypassCleared = (o: { zone: number; partition: number }): EventBlueprint =>
+  event({ type: EVENT_TYPE_BYPASS, qualifier: QUALIFIER_RESTORE, ...o });
 
 /** CMS comm path restored (CID 350 qualifier 3). */
 export const commPathOk = (o: { partition: number; channel?: number }): EventBlueprint =>
