@@ -203,6 +203,50 @@ export function buildDataReq(p: DataReqParams): Buffer {
   return Buffer.from(JSON.stringify(dataReqFrame(p)), 'utf8');
 }
 
+/** Largest HA→AS DATA payload the panel accepts (PROTOCOL.md, "DATA-REQ / DATA"). */
+export const MAX_DATA_WRITE_BYTES = 250;
+
+export interface DataWriteParams {
+  account: number;
+  counter: number;
+  password: string;
+  /** Parameter ID to write (e.g. PARAM_ID_BYPASSED_ZONES). */
+  id: number;
+  startOrder: number;
+  /** One entry per order, starting at `startOrder`. */
+  parameters: string[];
+}
+
+/**
+ * Object form of an HA→AS `DATA` frame — a configuration *write*, the
+ * counterpart to DATA-REQ's read. Field order mirrors `dataReqFrame` since
+ * the panel is picky about ordering elsewhere.
+ *
+ * Carries `password` — redact when logging.
+ */
+export function dataWriteFrame(p: DataWriteParams): Record<string, unknown> {
+  return {
+    frame_type: 'DATA',
+    counter: p.counter,
+    account: p.account,
+    password: p.password,
+    id: p.id,
+    start_order: p.startOrder,
+    parameters: p.parameters,
+  };
+}
+
+export function buildDataWrite(p: DataWriteParams): Buffer {
+  const buf = Buffer.from(JSON.stringify(dataWriteFrame(p)), 'utf8');
+  if (buf.length > MAX_DATA_WRITE_BYTES) {
+    throw new Error(
+      `DATA write is ${buf.length} bytes, over the panel's ${MAX_DATA_WRITE_BYTES}-byte limit `
+      + `(id=${p.id} start_order=${p.startOrder}, ${p.parameters.length} parameter(s)) — split it into pages`,
+    );
+  }
+  return buf;
+}
+
 /**
  * Contact ID-style event type codes per Appendix A of the spec.
  * - 760: zone open/closed (qualifier 1 = open, 3 = closed)
@@ -212,6 +256,8 @@ export function buildDataReq(p: DataReqParams): Buffer {
  * - 350: CMS communication path status (qualifier 3 = restore, 1 = trouble)
  *   — the `zone` field carries the channel/path index (Pima-specific).
  * - 130: burglary alarm (qualifier 1 = alarm, 3 = restore)
+ * - 570: zone bypass (qualifier 1 = bypassed, 3 = cleared) — emitted whether
+ *   the bypass came from the keypad or from a CMS write to parameter 2150.
  */
 export const EVENT_TYPE_ZONE = 760;
 export const EVENT_TYPE_OUTPUT = 770;
@@ -219,6 +265,7 @@ export const EVENT_TYPE_REMOTE_ARM = 407;
 export const EVENT_TYPE_LOCAL_ARM = 401;
 export const EVENT_TYPE_COMM = 350;
 export const EVENT_TYPE_BURGLARY = 130;
+export const EVENT_TYPE_BYPASS = 570;
 
 /** Qualifier 1 = new event (zone open / disarm). Qualifier 3 = restore (zone close / arm). */
 export const QUALIFIER_NEW = 1;

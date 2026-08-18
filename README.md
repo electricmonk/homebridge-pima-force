@@ -173,6 +173,7 @@ Multiple partitions with per-partition `armModes`, an explicit siren block, and 
 | `partition.name`     | Display name in HomeKit.                                                                                                                           | Yes      | —                      | String  |
 | `partition.userCode` | User code for arming / disarming this partition. Stored in plain text in `config.json` — protect access to the host accordingly.                  | Yes      | —                      | String  |
 | `partition.armModes` | Per-partition checkboxes for which HomeKit armed modes to expose. DISARM is always available — see "Arm-mode mapping" below.                      | No       | all enabled            | Object  |
+| `partition.exposeAccessory` | Set `false` to keep the partition as a credential only, with no HomeKit security-system tile. Useful for a partition that exists solely to authorise operations on its zones — see "Zone bypass" below. | No | `true` | Boolean |
 
 ### Arm-mode mapping
 
@@ -194,12 +195,47 @@ Per-partition `armModes` toggles correspond to those three armed states (`away`,
 | `zone.zone`     | Zone number on the panel.                                                                                                | Yes      | —           | Integer |
 | `zone.name`     | Display name in HomeKit.                                                                                                  | Yes      | —           | String  |
 | `zone.type`     | HomeKit sensor type: `contact` (door/window), `motion`, `leak`, `smoke`. Affects only the HomeKit icon and automation primitives — the panel-side semantics are identical.       | No       | `contact`   | String  |
+| `zone.partition` | Partition that owns this zone. Optional and informational — see "Zone bypass" below; any configured user code can bypass any zone. | No | — | Integer |
+| `zone.bypass`   | Expose a bypass switch for this zone — see "Zone bypass" below.                                                            | No       | disabled    | Object  |
+
+### Zone bypass
+
+Some zones are **24-hour**: they stay armed no matter what their partition is doing. Smoke and flood detectors are usually wired this way, which means *disarming the partition a smoke detector sits on does not stop it alarming*. You can check on your own panel by reading parameter 2149 while the partition is disarmed — a zone still reporting bit 10 (`Armed`) is 24-hour.
+
+The only thing that suppresses such a zone is **bypass** (panel parameter 2150). The classic case is cooking something smoky without tripping the kitchen detector.
+
+```jsonc
+{
+  "zone": 13,
+  "name": "Kitchen Smoke",
+  "type": "smoke",
+  "partition": 3,
+  "bypass": { "enabled": true, "autoClearMinutes": 30 }
+}
+```
+
+This adds a separate Switch accessory (default name `<zone name> Bypass`). **On = bypassed: the zone will not alarm.**
+
+| Parameter                    | Description                                                                                                     | Default              |
+|------------------------------|-----------------------------------------------------------------------------------------------------------------|----------------------|
+| `bypass.enabled`             | Expose the switch.                                                                                              | `false`              |
+| `bypass.name`                | Accessory name.                                                                                                  | `<zone name> Bypass` |
+| `bypass.autoClearMinutes`    | Clear the bypass automatically after this long, so a forgotten bypass can't leave a detector disabled. `0` disables the timer. | `30`                 |
+
+Notes:
+
+- **A bypassed smoke detector is a disabled smoke detector.** The auto-clear timer exists for that reason; think carefully before setting it to `0`.
+- The zone's sensor reports `StatusActive = false` while bypassed, so a suppressed detector doesn't look healthy in the Home app.
+- Bypasses applied at the keypad show up too — the panel reports them the same way, so HomeKit stays in sync either direction.
+- `zone.partition` is optional. The panel filters parameter *reads* by user code but not *writes*, so any configured user code can bypass any zone — including zones whose partition that code can't otherwise see. Setting it just documents ownership and picks which code the plugin sends. (This also means a low-privilege user code is enough to disable any detector on the panel; that's the panel's design, not the plugin's.)
+- `partition.exposeAccessory: false` is for a partition you want configured but not shown — note that a partition with no accessory also has nowhere to report `ALARM_TRIGGERED`, so its alarms will only appear in the log and on the individual zone sensors.
 
 ## Features
 
 - Per-partition Security System accessory; tracks AWAY / STAY / NIGHT / DISARM and ALARM_TRIGGERED on burglary events.
 - Per-zone HomeKit sensor of the configured type (contact / motion / leak / smoke).
 - Global Switch for the external siren — toggle off to mute an active siren (turning it on from HomeKit is rejected; the plugin won't sound the siren on demand).
+- Optional per-zone bypass Switch with an auto-clear timer — the only way to silence a 24-hour zone such as a smoke or flood detector.
 - State sync from any source (keypad, monitoring station, mobile app) reflected in HomeKit, not only changes initiated from the plugin.
 - Graceful handling of events from unconfigured partitions / zones — logged once, never crash.
 - Optional `debug` mode logs every JSON frame in / out of the panel (passwords redacted).

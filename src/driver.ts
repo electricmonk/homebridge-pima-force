@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   EVENT_TYPE_BURGLARY,
+  EVENT_TYPE_BYPASS,
   EVENT_TYPE_COMM,
   EVENT_TYPE_LOCAL_ARM,
   EVENT_TYPE_OUTPUT,
@@ -15,6 +16,7 @@ import {
   OPTYPE_ARM_SHABBAT,
   OPTYPE_DEACTIVATE_OUTPUT,
   OPTYPE_DISARM,
+  PARAM_ID_BYPASSED_ZONES,
   PARAM_ID_NUMBER_OF_INSTALLED_ZONES,
   PARAM_ID_SYSTEM_KEY_STATUS,
   PARAM_ID_ZONE_NAMES,
@@ -173,19 +175,79 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
    * responsible for issuing the follow-up request. See `paginateDataResponse`
    * in `src/pagination.ts` for the canonical loop.
    */
-  requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
-    const part = this.config.partitions[0];
-    if (!part && !params.password) {
-      return Promise.reject(new Error('no partition configured to derive a user code for DATA-REQ'));
-    }
-    return this.transport.send({
+  async requestData(params: { id: number; startOrder: number; stopOrder?: number; password?: string }): Promise<DataResponse> {
+    const frame = await this.transport.send({
       kind: 'data-req',
       account: this.config.account,
-      password: params.password ?? part!.userCode,
+      password: this.passwordFor(params.password, 'DATA-REQ'),
       id: params.id,
       startOrder: params.startOrder,
       stopOrder: params.stopOrder,
-    }).then((frame) => this.toDataResponse(frame));
+    });
+    return this.toDataResponse(frame);
+  }
+
+  /**
+   * User code to authenticate a DATA operation with: the caller's explicit
+   * one, else the first configured partition's.
+   *
+   * Throws when neither is available. Callers are `async`, so the throw
+   * surfaces as a rejected promise like every other failure on these paths —
+   * no synchronous surprise despite happening before the first await.
+   */
+  private passwordFor(explicit: string | undefined, what: string): string {
+    if (explicit !== undefined) return explicit;
+    const part = this.config.partitions[0];
+    if (!part) throw new Error(`no partition configured to derive a user code for ${what}`);
+    return part.userCode;
+  }
+
+  /**
+   * Write a configuration parameter (HA→AS `DATA`). The read counterpart is
+   * {@link requestData}. See {@link arm} for settlement semantics.
+   *
+   * Payload must fit the panel's 250-byte DATA limit — `buildDataWrite`
+   * throws rather than let an over-long frame reach the wire.
+   */
+  async writeData(params: { id: number; startOrder: number; parameters: string[]; password?: string }): Promise<PanelFrame> {
+    return this.transport.send({
+      kind: 'data-write',
+      account: this.config.account,
+      password: this.passwordFor(params.password, 'DATA write'),
+      id: params.id,
+      startOrder: params.startOrder,
+      parameters: params.parameters,
+    });
+  }
+
+  /**
+   * Bypass or un-bypass a single zone (parameter 2150).
+   *
+   * This is the only per-zone suppression the panel offers, and the only
+   * thing that silences a **24-hour** zone — smoke and flood zones stay armed
+   * regardless of their partition's arm state, so disarming the partition
+   * they sit on does nothing for them. Verified on a live panel 2026-08-18.
+   *
+   * Any configured user code authorises this. DATA *reads* are
+   * privilege-filtered but writes are not — measured on the live panel,
+   * partition 1's code bypassed a partition 3 zone it cannot even see in a
+   * 2149 read. Pass the owning partition's code by preference anyway.
+   */
+  setZoneBypass(zone: number, bypassed: boolean, opts: { password?: string } = {}): Promise<void> {
+    if (!Number.isInteger(zone) || zone < 1) {
+      return Promise.reject(new Error(`invalid zone number: ${zone}`));
+    }
+    return this.writeData({
+      id: PARAM_ID_BYPASSED_ZONES,
+      startOrder: zone,
+      parameters: [bypassed ? '1' : '0'],
+      password: opts.password,
+    }).then(() => undefined);
+  }
+
+  /** Read the bypass state of a zone range (parameter 2150). */
+  getZoneBypass(startOrder = 1, stopOrder?: number, password?: string): Promise<DataResponse> {
+    return this.requestData({ id: PARAM_ID_BYPASSED_ZONES, startOrder, stopOrder, password });
   }
 
   /** Convenience: request the panel's zone names (parameter id 260). */
@@ -323,6 +385,18 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
         return;
       }
       this.emit('output', { output, partition, active: qualifier === QUALIFIER_NEW });
+      return;
+    }
+
+    if (type === EVENT_TYPE_BYPASS) {
+      const zone = Number(frame.zone ?? 0);
+      if (!zone) {
+        this.emit('unknown', frame);
+        return;
+      }
+      // q=1 bypassed, q=3 cleared. The panel emits this for keypad bypasses
+      // too, so it's how we learn about suppression we didn't initiate.
+      this.emit('bypass', { zone, partition, bypassed: qualifier === QUALIFIER_NEW });
       return;
     }
 

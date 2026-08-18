@@ -83,7 +83,9 @@ describe('E2E: UI → panel commands', { timeout: 60_000 }, () => {
   it('UI SecuritySystem DISARM target sends disarm OPERATION', async () => {
     using alarm = await harness.connectAlarm();
     const partition = harness.homebridge.partition(partition1.name);
-    // Force AWAY_ARM first so the DISARM transition actually triggers a SET.
+    // Arm first so this exercises a real AWAY→DISARM transition. (DISARM
+    // now reaches the panel unconditionally, so the arm isn't needed to
+    // provoke the SET any more — it just keeps the scenario realistic.)
     await partition.setTarget(AWAY_ARM);
     await partition.setTarget(DISARMED);
 
@@ -112,9 +114,15 @@ describe('E2E: UI → panel commands', { timeout: 60_000 }, () => {
     // tapping OFF in the Home app silently sent nothing.
     using alarm = await harness.connectAlarm();
     const siren = harness.homebridge.siren(sirenName);
-    // Deliberately no `sirenActivated` event — simulates the panel
-    // sounding without us ever seeing the 770 q=1.
-    assert.equal(await siren.on(), false, 'precondition: switch is OFF');
+    // Establish the precondition from the panel side rather than assuming
+    // it: the preceding test leaves the switch On, because an un-confirmed
+    // mute no longer flips it (see the 2026-08-17 incident regression in
+    // alarm-incident.test.ts). A 770 q=3 is the only thing that turns it Off.
+    await alarm.report(sirenDeactivated({ partition: 1 }));
+    await eventually(async () => assert.equal(await siren.on(), false));
+
+    // From here on, deliberately no `sirenActivated` event — this simulates
+    // the panel sounding without us ever seeing the 770 q=1.
 
     await siren.setOn(false);
     const op = await alarm.nextOperation({ optype: OPTYPE_DEACTIVATE_OUTPUT });

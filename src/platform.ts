@@ -17,12 +17,33 @@ import {
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { SirenSwitch, type SirenAccessoryContext } from './siren-switch.js';
 import type { ZoneType } from './types.js';
+import {
+  DEFAULT_AUTO_CLEAR_MINUTES,
+  ZoneBypassSwitch,
+  type ZoneBypassAccessoryContext,
+} from './zone-bypass-switch.js';
 import { ZoneSensor, type ZoneAccessoryContext } from './zone-sensor.js';
+
+interface ZoneBypassConfig {
+  /** Expose a bypass Switch accessory for this zone. Off by default. */
+  enabled?: boolean;
+  /** Accessory name. Defaults to `<zone name> Bypass`. */
+  name?: string;
+  /** Minutes before an active bypass clears itself. 0 disables. */
+  autoClearMinutes?: number;
+}
 
 interface ZoneConfig {
   zone: number;
   name: string;
   type?: ZoneType;
+  /**
+   * Partition whose user code authorises DATA operations on this zone.
+   * DATA is privilege-filtered per user code, so bypassing a zone requires
+   * the code of the partition that owns it. Only needed for bypass.
+   */
+  partition?: number;
+  bypass?: ZoneBypassConfig;
 }
 
 const DEFAULT_ZONE_TYPE: ZoneType = 'contact';
@@ -37,6 +58,14 @@ interface PartitionConfigEntry {
   zones?: ZoneConfig[];
   /** Optional checkboxes for which HomeKit armed states to expose. */
   armModes?: { away?: boolean; stay?: boolean; night?: boolean };
+  /**
+   * Set false to keep the partition as a credential without giving it a
+   * HomeKit SecuritySystem tile. Useful for a partition that exists only to
+   * authorise DATA operations on its zones — e.g. a smoke-only partition
+   * whose zones are 24-hour and therefore can't be suppressed by arming or
+   * disarming it anyway. Defaults to true.
+   */
+  exposeAccessory?: boolean;
 }
 
 interface SirenConfig {
@@ -63,7 +92,11 @@ interface PimaForcePlatformConfig extends PlatformConfig {
   requestTimeoutMs?: number;
 }
 
-type AnyContext = PartitionAccessoryContext | ZoneAccessoryContext | SirenAccessoryContext;
+type AnyContext =
+  | PartitionAccessoryContext
+  | ZoneAccessoryContext
+  | SirenAccessoryContext
+  | ZoneBypassAccessoryContext;
 
 /** Strip the `password` field from a frame before logging. */
 function redactPassword(frame: Record<string, unknown>): Record<string, unknown> {
@@ -80,6 +113,8 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   private readonly zones = new Map<number, ZoneSensor>();
   /** Output number → accessory (e.g., 1 = external siren). */
   private readonly sirens = new Map<number, SirenSwitch>();
+  /** Zone number → bypass switch, for zones with bypass enabled in config. */
+  private readonly zoneBypasses = new Map<number, ZoneBypassSwitch>();
   /** Track ids we've already info-logged so we don't spam on every event. */
   private readonly seenUnknownPartitions = new Set<number>();
   private readonly seenUnknownZones = new Set<number>();
@@ -170,6 +205,17 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         this.noteUnknownOutput(output, partition, active);
       }
     });
+    this.driver.on('bypass', ({ zone, partition, bypassed }) => {
+      // CID 570 is the authoritative confirmation, and the panel emits it for
+      // keypad bypasses too — so this keeps HomeKit right regardless of who
+      // suppressed the zone.
+      const name = this.zones.has(zone) ? `zone ${zone}` : `unconfigured zone ${zone}`;
+      log.info(`${name} (partition ${partition}) ${bypassed ? 'BYPASSED — it will not alarm' : 'bypass cleared'}`);
+      this.zoneBypasses.get(zone)?.setBypassed(bypassed);
+      // Reflect it on the sensor too, so a suppressed detector doesn't look
+      // healthy in the Home app even when no bypass switch is exposed.
+      this.zones.get(zone)?.setBypassed(bypassed);
+    });
     this.driver.on('alarm', ({ zone, partition, active }) => {
       const acc = this.partitions.get(partition);
       if (acc) {
@@ -205,6 +251,7 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
 
     api.on('didFinishLaunching', () => this.discoverDevices());
     api.on('shutdown', () => {
+      for (const b of this.zoneBypasses.values()) b.dispose();
       void this.driver.stop();
     });
   }
@@ -299,6 +346,21 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
   }
 
   private discoverDevices(): void {
+    const desiredUuids = this.registerConfiguredAccessories();
+    this.pruneStaleAccessories(desiredUuids);
+
+    if ((this.config.partitions ?? []).length === 0) {
+      this.log.warn('No partitions configured — not starting driver. Open the plugin settings to add at least one partition.');
+      return;
+    }
+
+    this.driver.start().catch((err) => {
+      this.log.error(`failed to start driver: ${(err as Error).message}`);
+    });
+  }
+
+  /** Register every accessory the config asks for; returns their UUIDs. */
+  private registerConfiguredAccessories(): Set<string> {
     const partitions = this.config.partitions ?? [];
     const desiredUuids = new Set<string>();
 
@@ -308,10 +370,19 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     }
 
     for (const partConfig of partitions) {
+      // A partition can be configured purely as a credential — see
+      // `exposeAccessory`. It still feeds the driver's user-code table.
+      if (partConfig.exposeAccessory === false) {
+        this.log.info(`partition ${partConfig.id} (${partConfig.name}): exposeAccessory=false — no HomeKit tile, user code still available for its zones`);
+        continue;
+      }
       desiredUuids.add(this.registerPartition(partConfig));
     }
     for (const zoneConfig of flatZones) {
       desiredUuids.add(this.registerZone(zoneConfig));
+      if (zoneConfig.bypass?.enabled) {
+        desiredUuids.add(this.registerZoneBypass(zoneConfig));
+      }
     }
 
     // Optional global siren accessory (single instance, output 1 by default).
@@ -321,25 +392,19 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       desiredUuids.add(this.registerSiren(sirenCfg.name ?? DEFAULT_SIREN_NAME));
     }
 
-    // Unregister any cached accessories no longer in config.
+    return desiredUuids;
+  }
+
+  /** Unregister cached accessories that config no longer asks for. */
+  private pruneStaleAccessories(desiredUuids: Set<string>): void {
     const stale: PlatformAccessory<AnyContext>[] = [];
     for (const [uuid, acc] of this.cachedAccessories) {
       if (!desiredUuids.has(uuid)) stale.push(acc);
     }
-    if (stale.length > 0) {
-      this.log.info(`removing ${stale.length} stale accessory(ies): ${stale.map(a => a.displayName).join(', ')}`);
-      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
-      for (const acc of stale) this.cachedAccessories.delete(acc.UUID);
-    }
-
-    if (partitions.length === 0) {
-      this.log.warn('No partitions configured — not starting driver. Open the plugin settings to add at least one partition.');
-      return;
-    }
-
-    this.driver.start().catch((err) => {
-      this.log.error(`failed to start driver: ${(err as Error).message}`);
-    });
+    if (stale.length === 0) return;
+    this.log.info(`removing ${stale.length} stale accessory(ies): ${stale.map(a => a.displayName).join(', ')}`);
+    this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
+    for (const acc of stale) this.cachedAccessories.delete(acc.UUID);
   }
 
   private registerPartition(p: PartitionConfigEntry): string {
@@ -394,6 +459,55 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     }
     this.zones.set(z.zone, new ZoneSensor(this, accessory));
     return uuid;
+  }
+
+  private registerZoneBypass(z: ZoneConfig): string {
+    const uuid = this.api.hap.uuid.generate(`pima-force:zone-bypass:${z.zone}`);
+    const name = z.bypass?.name ?? `${z.name} Bypass`;
+    const autoClearMinutes = z.bypass?.autoClearMinutes ?? DEFAULT_AUTO_CLEAR_MINUTES;
+
+    // `partition` is optional. Measured on the live panel 2026-08-18: DATA
+    // *reads* are privilege-filtered (partition 1's code can't see zone 13 in
+    // 2149 at all) but DATA *writes* are not — partition 1's code bypassed
+    // zone 13, which belongs to partition 3, and the panel applied it. So any
+    // configured user code will do; naming the owner is just good hygiene.
+    const ctx: ZoneBypassAccessoryContext = {
+      kind: 'zone-bypass',
+      zone: z.zone,
+      name,
+      partition: z.partition,
+      autoClearMinutes,
+    };
+    let accessory = this.cachedAccessories.get(uuid) as
+      | PlatformAccessory<ZoneBypassAccessoryContext>
+      | undefined;
+    if (accessory) {
+      accessory.context = ctx;
+      accessory.displayName = name;
+    } else {
+      accessory = new this.api.platformAccessory<ZoneBypassAccessoryContext>(name, uuid);
+      accessory.context = ctx;
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.cachedAccessories.set(uuid, accessory as PlatformAccessory<AnyContext>);
+      this.log.info(`registered zone bypass switch: ${name} (zone ${z.zone})`);
+    }
+    this.zoneBypasses.set(z.zone, new ZoneBypassSwitch(this, accessory));
+    return uuid;
+  }
+
+  /**
+   * User code for a partition, used to authorise panel operations on its
+   * zones. Falls back to the first configured partition — which is a working
+   * fallback, not just a safety net: DATA writes aren't privilege-filtered
+   * (see `registerZoneBypass`), so any configured code authorises a bypass.
+   *
+   * Codes are read from live config on demand and deliberately never stored
+   * in `accessory.context`, which Homebridge serialises to disk.
+   */
+  userCodeForPartition(id?: number): string | undefined {
+    const partitions = this.config.partitions ?? [];
+    const match = id === undefined ? undefined : partitions.find((p) => p.id === id);
+    return (match ?? partitions[0])?.userCode;
   }
 
   /**

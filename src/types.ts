@@ -90,6 +90,24 @@ export interface OutputEvent {
   active: boolean;
 }
 
+/**
+ * Zone bypass state change (CID 570). Emitted whether the bypass came from
+ * the keypad or from a CMS write to parameter 2150.
+ *
+ * Bypass is the only per-zone suppression the panel offers, and the only
+ * thing that quiets a 24-hour zone: smoke and flood zones keep the Armed bit
+ * in 2149 no matter what their partition is doing, so disarming that
+ * partition does nothing for them. Verified on a live panel 2026-08-18 —
+ * bypassing zone 13 flipped it from `0x0400` (Armed) to `0x0080`
+ * (ManualBypass), and clearing it put the Armed bit back.
+ */
+export interface BypassEvent {
+  zone: number;
+  partition: number;
+  /** True when the zone has been bypassed, false when the bypass is cleared. */
+  bypassed: boolean;
+}
+
 /** Burglary alarm: a zone tripped while armed and is sounding the siren. */
 export interface AlarmEvent {
   zone: number;
@@ -169,6 +187,7 @@ export interface PimaDriverEvents {
   disarm: [ArmEvent];
   zone: [ZoneEvent];
   output: [OutputEvent];
+  bypass: [BypassEvent];
   alarm: [AlarmEvent];
   system: [SystemEvent];
   nak: [NakEvent];

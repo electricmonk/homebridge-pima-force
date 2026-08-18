@@ -69,6 +69,7 @@ export class ZoneSensor {
   private readonly service: Service;
   private readonly binding: SensorBinding;
   private active = false;
+  private bypassed = false;
 
   constructor(
     private readonly platform: PimaForcePlatform,
@@ -102,6 +103,15 @@ export class ZoneSensor {
     this.service
       .getCharacteristic(this.binding.characteristic)
       .onGet(() => this.value());
+
+    // StatusActive is read-only in HAP (perms are NOTIFY + PAIRED_READ), so
+    // it can't be a bypass *control* — but it's exactly right as a bypass
+    // *indicator*. Driving it means a bypassed detector doesn't look
+    // identical to a working one in the Home app.
+    this.service
+      .getCharacteristic(Characteristic.StatusActive)
+      .onGet(() => !this.bypassed);
+    this.service.updateCharacteristic(Characteristic.StatusActive, true);
   }
 
   /** Update from a panel zone event. */
@@ -109,6 +119,20 @@ export class ZoneSensor {
     if (this.active === active) return;
     this.active = active;
     this.service.updateCharacteristic(this.binding.characteristic, this.value());
+  }
+
+  /**
+   * Reflect the zone's bypass state (panel CID 570). A bypassed zone will not
+   * alarm, so report it as inactive rather than leaving the tile looking
+   * healthy.
+   */
+  setBypassed(bypassed: boolean): void {
+    if (this.bypassed === bypassed) return;
+    this.bypassed = bypassed;
+    this.service.updateCharacteristic(
+      this.platform.api.hap.Characteristic.StatusActive,
+      !bypassed,
+    );
   }
 
   private value(): number | boolean {

@@ -49,6 +49,24 @@ Every frame: `{frame_type, counter, account, ...}`
 Reasons (Appendix D, debug-only — vendor reserves the right to change strings):
 `Parameter Not Exist` · `Order Not Exist` · `Start-Stop Order Error` · `Parameter(s) Missing` · `Invalid JSON frame` · `Invalid Frame Type` · `Bit Error` · `Wrong User Code` · `Wrong Account ID` · `Wrong Sequence Number`.
 
+### Operational NAKs (not in Appendix D)
+
+The panel also rejects OPERATIONs it can't carry out, using **localized Hebrew
+strings that Appendix D doesn't list**. Observed on the live panel:
+
+| string | meaning | when |
+|---|---|---|
+| `סגור/בטל אזורים!` | "Close/bypass zones!" | arm (optype 12–16) refused because a zone in the partition is open — the panel is pointing at parameter 2150 as the way through |
+| `כל המדורים מנוטרלים` | "All partitions are disarmed" | disarm (optype 17) aimed at a partition already disarmed; a 2310 read either side confirms nothing changed |
+
+Both are *rejections of a no-op or of an unsatisfiable request*, not transport
+errors. **Don't surface them to the user as a command failure** — in HomeKit a
+`SERVICE_COMMUNICATION_FAILURE` renders as "No Response", which is worse than
+the no-op it's reporting. And don't classify on the text: it's undocumented and
+localized. Decide from state instead — e.g. a rejected disarm when nothing was
+believed armed changed nothing worth reporting. See `handleSetTarget` in
+`src/partition-security-system.ts`.
+
 ## OPERATION
 
 `{frame_type:"OPERATION", counter, account, password:"<PIN>", optype, opclass:1, order, partition, parameters?}`
@@ -90,10 +108,46 @@ Parameters (Appendix C):
 | 411 | User Name | user 1–144 | str |
 | 2148 | Number of installed zones | 0 | num |
 | 2149 | Zone Status | — | hex bitfield (below) |
-| 2150 | Bypass (read & write) | zone# | `"1"`=bypass, `"0"`=clear |
+| 2150 | Bypass (write; see below) | zone# | `"1"`=bypass, `"0"`=clear |
 | 2250 | Faults | — | hex (below) |
 | 2301 | Sirens / Outputs status | 1–2 sirens, 34–41 outputs | bitfield |
 | 2310 | System Key Status | partition 1–16 | num |
+
+### Writing a parameter (HA→AS DATA) — verified for zone bypass (2150)
+
+A config write is an HA→AS `DATA` frame. Field order mirrors DATA-REQ, with
+`parameters` appended (one entry per order, starting at `start_order`):
+
+```json
+{"frame_type":"DATA","counter":42,"account":1234,"password":"1111","id":2150,"start_order":13,"parameters":["1"]}
+```
+
+Confirmed against a live panel on 2026-08-18 — bypassing zone 13 and clearing
+it again. What we learned:
+
+- The panel **accepts and applies** the write. `"1"` bypasses, `"0"` clears.
+- It **acknowledges** the write, then emits **CID 570** (`qualifier` 1 =
+  bypassed, 3 = cleared) carrying the zone and partition — the same event a
+  keypad bypass produces. Treat 570 as the confirmation, not the ACK.
+- Verify the effect via **2149 bit 7 (ManualBypass)**, not via a 2150 read:
+  reading 2150 over `start_order` 1–24 returned an **empty** array both before
+  and during an active bypass, so the read side is not a reliable mirror.
+- **Bypassing clears the Armed bit.** Zone 13 went `0x0400` (Armed) →
+  `0x0080` (ManualBypass) → `0x0400` again on clear. This is why bypass is the
+  only thing that suppresses a 24-hour zone.
+- Payload must stay within the 250-byte DATA limit; `buildDataWrite` throws
+  rather than putting an oversized frame on the wire.
+
+**Writes are NOT privilege-filtered, though reads are.** Measured 2026-08-18:
+partition 1's user code cannot see zone 13 (a partition 3 zone) in a 2149
+read at all — and bypassed it anyway, with the panel applying the change and
+emitting CID 570. So the per-partition filtering documented above for DATA-REQ
+does *not* extend to DATA writes: **any valid user code can bypass any zone**,
+including zones its partition has no visibility of.
+
+Worth knowing in both directions. Practically, a caller doesn't need to work
+out which partition owns a zone before bypassing it. Security-wise, a
+low-privilege user code is enough to disable any detector on the panel.
 
 ### System Key Status (id 2310)
 
@@ -119,6 +173,17 @@ Bit → meaning (counted across upper bytes, bit 0 of byte 1):
 `0`=SupervisionLoss · `1`=LowBattery · `2`=Short · `3`=Cut(Tamper) · `4`=Soak · `5`=Chime · `6`=AntiMask · `7`=ManualBypass · `8`=AutoBypass · `9`=Alarmed · `10`=Armed · `11`=Open · `12`=Duress · `13`=Fire · `14`=Medical · `15`=Panic.
 
 Example: `"0A0019"` → zone `0x19`=25, upper `0x0A00` has bits 9+11 → alarmed + open.
+
+**Bit 10 (Armed) identifies 24-hour zones.** Read 2149 while a partition is
+Disarmed (per 2310): any of its zones still reporting `0x0400` is armed
+around the clock. Measured on the live panel 2026-08-18 — partition 1 read
+Disarmed while all twelve of its smoke and flood zones reported `0x0400`.
+
+The consequence bites at the product level: **a 24-hour zone cannot be
+suppressed by disarming its partition**, however the partitions are named or
+organised. Such a zone will raise CID 130 on a partition the panel itself
+reports as disarmed. The only per-zone suppression is bypass (parameter
+2150) — which is exactly what the `סגור/בטל אזורים!` NAK is telling you.
 
 ### Faults (id 2250)
 
@@ -266,7 +331,7 @@ Empty `parameters: []` ⇒ no faults. `"more":"yes"` ⇒ paginate.
 | 421 | Access denied (invalid code / outside time window) | 0 |
 | 441 | Home-X / Shabbat arm | 0=master, N=user (q=3) |
 | 454 | Inactivity | 0 |
-| 570 | Bypass / unbypass | zone# |
+| **570** | **Bypass / unbypass** (q=1 bypassed, q=3 cleared) — keypad *and* CMS 2150 writes | zone# |
 | 601 | Manual test (installer) | 0 |
 | 602 | Auto periodic test | 0 |
 | 625 | Time/Date changed | 0 |
