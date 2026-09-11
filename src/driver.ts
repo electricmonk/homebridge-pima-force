@@ -3,6 +3,7 @@ import {
   EVENT_TYPE_BURGLARY,
   EVENT_TYPE_BYPASS,
   EVENT_TYPE_COMM,
+  EVENT_TYPE_HOME_ARM,
   EVENT_TYPE_LOCAL_ARM,
   EVENT_TYPE_OUTPUT,
   EVENT_TYPE_REMOTE_ARM,
@@ -353,9 +354,11 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       return;
     }
 
-    if (type === EVENT_TYPE_REMOTE_ARM || type === EVENT_TYPE_LOCAL_ARM) {
+    if (type === EVENT_TYPE_REMOTE_ARM || type === EVENT_TYPE_LOCAL_ARM || type === EVENT_TYPE_HOME_ARM) {
       const source: ArmEventSource =
-        type === EVENT_TYPE_REMOTE_ARM ? 'remote' : 'local';
+        type === EVENT_TYPE_REMOTE_ARM ? 'remote'
+          : type === EVENT_TYPE_LOCAL_ARM ? 'local'
+            : 'home';
       // qualifier 3 = restore = ARMED (closed); qualifier 1 = new event = DISARMED (opened)
       if (qualifier === QUALIFIER_RESTORE) {
         this.emit('arm', { partition, source });
