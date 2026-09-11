@@ -173,7 +173,14 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
       const acc = this.partitions.get(partition);
       if (acc) {
         log.info(`partition ${partition} ARMED (source: ${source})`);
-        acc.setArmedFromPanel(true);
+        // CID 441 reports a Home-X/Shabbat arm but does not say which mode.
+        // Query 2310 so HomeKit reflects Home1/Home2/etc. accurately instead
+        // of guessing from the CID event alone.
+        if (source === 'home') {
+          void this.queryPartitionState(partition);
+        } else {
+          acc.setArmedFromPanel(true);
+        }
       } else {
         this.noteUnknownPartition(partition, `arm (source: ${source})`);
       }
@@ -269,28 +276,33 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     // command-at-a-time contract.
     const stale: number[] = [];
     for (const p of partitions) {
-      try {
-        const res = await this.driver.getSystemKeyStatus(p.id);
-        if (res.more) {
-          this.log.warn(`DATA id=2310 returned more=true (partition=${p.id}, count=${res.parameters.length}); additional pages not fetched`);
-        }
-        // 2310 with start_order=stop_order=partitionId returns a single value:
-        // the system key status for that partition.
-        const status = Number(res.parameters[0]);
-        const acc = this.partitions.get(p.id);
-        if (acc) {
-          this.log.info(`partition ${p.id} startup state: ${status}`);
-          acc.setStateFromStartupStatus(status);
-        }
-      } catch (err) {
-        this.log.warn(`failed to query state for partition ${p.id}: ${(err as Error).message}`);
-        stale.push(p.id);
-      }
+      if (!await this.queryPartitionState(p.id)) stale.push(p.id);
     }
     if (stale.length > 0) {
       this.log.warn(
         `startup state query timed out for partition(s) ${stale.join(', ')} — HomeKit state may be stale until next reconnect`,
       );
+    }
+  }
+
+  /** Read and apply the authoritative System Key Status for one partition. */
+  private async queryPartitionState(partitionId: number): Promise<boolean> {
+    try {
+      const res = await this.driver.getSystemKeyStatus(partitionId);
+      if (res.more) {
+        this.log.warn(`DATA id=2310 returned more=true (partition=${partitionId}, count=${res.parameters.length}); additional pages not fetched`);
+      }
+      const status = Number(res.parameters[0]);
+      const acc = this.partitions.get(partitionId);
+      if (acc) {
+        this.log.info(`partition ${partitionId} state: ${status}`);
+        acc.setStateFromStartupStatus(status);
+      }
+      return true;
+    }
+    catch (err) {
+      this.log.warn(`failed to query state for partition ${partitionId}: ${(err as Error).message}`);
+      return false;
     }
   }
 

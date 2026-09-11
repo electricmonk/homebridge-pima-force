@@ -263,6 +263,8 @@ export const EVENT_TYPE_ZONE = 760;
 export const EVENT_TYPE_OUTPUT = 770;
 export const EVENT_TYPE_REMOTE_ARM = 407;
 export const EVENT_TYPE_LOCAL_ARM = 401;
+/** CID 441: Home-X / Shabbat arm (qualifier 3). */
+export const EVENT_TYPE_HOME_ARM = 441;
 export const EVENT_TYPE_COMM = 350;
 export const EVENT_TYPE_BURGLARY = 130;
 export const EVENT_TYPE_BYPASS = 570;

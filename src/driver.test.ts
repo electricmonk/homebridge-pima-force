@@ -195,6 +195,21 @@ describe('PimaDriver — receive side', () => {
     assert.deepEqual(event, { partition: 1, source: 'local' });
   });
 
+  it('emits arm with source=home on CID 441 Home-X arm event', async () => {
+    await using driver = await setupDriver();
+    using alarm = await connectAlarm(driver);
+    const off = once(driver, 'arm');
+    // Vendor protocol Appendix A: 441 q=3 reports Home-X / Shabbat arm.
+    await alarm.report({ type: 441, qualifier: 3, zone: 0, partition: 1 });
+    const [event] = await Promise.race([
+      off,
+      new Promise<never>((_resolve, reject) => setTimeout(
+        () => reject(new Error('CID 441 did not emit an arm event')), 100,
+      )),
+    ]);
+    assert.deepEqual(event, { partition: 1, source: 'home' });
+  });
+
   it('emits bypass when a zone is bypassed (CID 570 q=1)', async () => {
     // Captured from the live panel while writing parameter 2150:
     //   {"type":570,"qualifier":1,"zone":13,"partition":3}
