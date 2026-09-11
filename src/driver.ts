@@ -44,6 +44,13 @@ const ARM_MODE_TO_OPTYPE: Record<ArmMode, number> = {
   shabbat: OPTYPE_ARM_SHABBAT,
 };
 
+/** Contact-ID event type → the origin of its corresponding arm event. */
+const ARM_EVENT_SOURCES: ReadonlyMap<number, ArmEventSource> = new Map([
+  [EVENT_TYPE_REMOTE_ARM, 'remote'],
+  [EVENT_TYPE_LOCAL_ARM, 'local'],
+  [EVENT_TYPE_HOME_ARM, 'home'],
+]);
+
 /**
  * Domain layer for the Pima FORCE local CMS protocol. Translates HomeKit-
  * level operations (arm/disarm, output toggles, parameter queries) into
@@ -354,11 +361,8 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
       return;
     }
 
-    if (type === EVENT_TYPE_REMOTE_ARM || type === EVENT_TYPE_LOCAL_ARM || type === EVENT_TYPE_HOME_ARM) {
-      const source: ArmEventSource =
-        type === EVENT_TYPE_REMOTE_ARM ? 'remote'
-          : type === EVENT_TYPE_LOCAL_ARM ? 'local'
-            : 'home';
+    const source = ARM_EVENT_SOURCES.get(type);
+    if (source) {
       // qualifier 3 = restore = ARMED (closed); qualifier 1 = new event = DISARMED (opened)
       if (qualifier === QUALIFIER_RESTORE) {
         this.emit('arm', { partition, source });
