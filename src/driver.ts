@@ -48,7 +48,6 @@ const ARM_MODE_TO_OPTYPE: Record<ArmMode, number> = {
 const ARM_EVENT_SOURCES: ReadonlyMap<number, ArmEventSource> = new Map([
   [EVENT_TYPE_REMOTE_ARM, 'remote'],
   [EVENT_TYPE_LOCAL_ARM, 'local'],
-  [EVENT_TYPE_HOME_ARM, 'home'],
 ]);
 
 /**
@@ -358,6 +357,18 @@ export class PimaDriver extends EventEmitter<PimaDriverEvents> {
         partition,
         active: qualifier === QUALIFIER_NEW,
       });
+      return;
+    }
+
+    if (type === EVENT_TYPE_HOME_ARM) {
+      // Appendix A documents CID 441 only as Home-X / Shabbat *arm* (q=3).
+      // Do not infer that q=1 means disarm: that has not been observed or
+      // documented for this event, and a false HomeKit disarm is unsafe.
+      if (qualifier === QUALIFIER_RESTORE) {
+        this.emit('arm', { partition, source: 'home' });
+      } else {
+        this.emit('unknown', frame);
+      }
       return;
     }
 

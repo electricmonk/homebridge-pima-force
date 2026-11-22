@@ -329,7 +329,7 @@ Empty `parameters: []` ⇒ no faults. `"more":"yes"` ⇒ paginate.
 | 409 | Key-switch disarm / arm | zone# |
 | 412 | Upload/Download remote | 0 |
 | 421 | Access denied (invalid code / outside time window) | 0 |
-| 441 | Home-X / Shabbat arm | 0=master, N=user (q=3) |
+| **441** | **Home-X / Shabbat arm** | 0=master, N=user (q=3). The plugin handles this by reading System Key Status (2310), because 441 does not identify Home1/2/3/4 or Shabbat. `q=1` is not documented or treated as a disarm. |
 | 454 | Inactivity | 0 |
 | **570** | **Bypass / unbypass** (q=1 bypassed, q=3 cleared) — keypad *and* CMS 2150 writes | zone# |
 | 601 | Manual test (installer) | 0 |

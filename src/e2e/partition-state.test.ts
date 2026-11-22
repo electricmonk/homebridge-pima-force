@@ -143,4 +143,20 @@ describe('E2E: CID 441 Home-X arm event', { timeout: 30_000 }, () => {
       await harness.homebridge.partition(partition.name).currentState(), STAY_ARM,
     ));
   });
+
+  it('falls back to armed when the CID 441 refresh times out', async () => {
+    using alarm = await harness.connectAlarm();
+    const startup = await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition.id });
+    alarm.respond(startup, partitionStatus({ status: PARTITION_DISARMED }));
+    // Discovery completed during the prior test in this shared harness, so no
+    // zone-count query is expected after this reconnect.
+
+    await alarm.report({ type: 441, qualifier: 3, partition: partition.id, zone: 0 });
+    await alarm.nextQuery({ id: PARAM_ID_SYSTEM_KEY_STATUS, startOrder: partition.id });
+    // Do not respond: the test harness's 150ms request timeout exercises the
+    // conservative fallback rather than leaving HomeKit disarmed.
+    await eventually(async () => assert.equal(
+      await harness.homebridge.partition(partition.name).currentState(), AWAY_ARM,
+    ), { timeoutMs: 2_000 });
+  });
 });

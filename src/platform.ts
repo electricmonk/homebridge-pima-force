@@ -172,13 +172,16 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
     this.driver.on('arm', ({ partition, source }) => {
       const acc = this.partitions.get(partition);
       if (acc) {
-        log.info(`partition ${partition} ARMED (source: ${source})`);
         // CID 441 reports a Home-X/Shabbat arm but does not say which mode.
         // Query 2310 so HomeKit reflects Home1/Home2/etc. accurately instead
         // of guessing from the CID event alone.
         if (source === 'home') {
-          void this.queryPartitionState(partition);
+          log.info(`partition ${partition} arm event (source: home), refreshing authoritative state`);
+          // refreshHomeArmState catches its own failures; deliberately fire-and-forget
+          // so incoming panel events are never blocked by a DATA-REQ timeout.
+          void this.refreshHomeArmState(partition, acc);
         } else {
+          log.info(`partition ${partition} ARMED (source: ${source})`);
           acc.setArmedFromPanel(true);
         }
       } else {
@@ -299,11 +302,24 @@ export class PimaForcePlatform implements DynamicPlatformPlugin {
         acc.setStateFromStartupStatus(status);
       }
       return true;
-    }
-    catch (err) {
+    } catch (err) {
       this.log.warn(`failed to query state for partition ${partitionId}: ${(err as Error).message}`);
       return false;
     }
+  }
+
+  /**
+   * Refresh a CID 441 Home-X/Shabbat arm from the authoritative panel state.
+   * This method intentionally never rejects: failure falls back to a generic
+   * armed state, which is safer than leaving HomeKit disarmed while the panel
+   * is armed. A later successful 2310 query corrects the exact arm mode.
+   */
+  private async refreshHomeArmState(partitionId: number, acc: PartitionSecuritySystem): Promise<void> {
+    if (await this.queryPartitionState(partitionId)) return;
+    this.log.warn(
+      `CID 441 refresh failed for partition ${partitionId}; marking HomeKit armed until a later state refresh succeeds`,
+    );
+    acc.setArmedFromPanel(true);
   }
 
   private noteUnknownPartition(id: number, what: string): void {

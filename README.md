@@ -255,6 +255,7 @@ Notes:
 - Global Switch for the external siren — toggle off to mute an active siren (turning it on from HomeKit is rejected; the plugin won't sound the siren on demand).
 - Optional per-zone bypass Switch with an auto-clear timer — the only way to silence a 24-hour zone such as a smoke or flood detector.
 - State sync from any source (keypad, monitoring station, mobile app) reflected in HomeKit, not only changes initiated from the plugin.
+- Home-X / Shabbat arm events (CID 441) trigger an authoritative System Key Status (2310) refresh, so HomeKit selects the reported Home mode rather than guessing from the event alone. If that refresh times out, HomeKit conservatively remains armed until a later refresh succeeds.
 - Graceful handling of events from unconfigured partitions / zones — logged once, never crash.
 - Optional `debug` mode logs every JSON frame in / out of the panel (passwords redacted).
 
