@@ -1,3 +1,9 @@
+## [0.1.26](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.25...v0.1.26) (2026-11-22)
+
+### Bug Fixes
+
+* **ci:** keep hook errors, skip failing todos, strip U+FFFE/FFFF in JUnit ([#32](https://github.com/electricmonk/homebridge-pima-force/issues/32)) ([2790a0a](https://github.com/electricmonk/homebridge-pima-force/commit/2790a0ae23f27c97b372e1092ffd225e262d47a2))
+
 ## [0.1.25](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.24...v0.1.25) (2026-11-22)
 
 ## [0.1.24](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.23...v0.1.24) (2026-11-22)
