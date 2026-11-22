@@ -1,3 +1,9 @@
+## [0.1.27](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.26...v0.1.27) (2026-11-22)
+
+### Bug Fixes
+
+* refresh state after CID 441 Home-X arm event ([#28](https://github.com/electricmonk/homebridge-pima-force/issues/28)) ([06821c1](https://github.com/electricmonk/homebridge-pima-force/commit/06821c1d3ab9713a4386bb43e7d2beb63f545f25))
+
 ## [0.1.26](https://github.com/electricmonk/homebridge-pima-force/compare/v0.1.25...v0.1.26) (2026-11-22)
 
 ### Bug Fixes
