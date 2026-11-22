@@ -104,7 +104,7 @@ describe('parseFrames', () => {
 
 describe('shouldAck', () => {
   it('does not ACK ACK frames (no echo)', () => {
-    assert.equal(shouldAck({ frame_type: 'ACK' }), false);
+    assert.equal(shouldAck({ frame_type: 'ACK' }), true); // INTENTIONAL FAILURE (CircleCI demo)
   });
   it('does not ACK NAK frames (no feedback loop)', () => {
     assert.equal(shouldAck({ frame_type: 'NAK' }), false);

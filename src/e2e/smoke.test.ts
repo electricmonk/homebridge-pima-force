@@ -61,6 +61,6 @@ describe('E2E smoke: accessory registration', { timeout: 60_000 }, () => {
   it('siren is exposed as a Switch service', async () => {
     if (!config.siren?.enabled || !config.siren.name) return;
     const acc = await harness.homebridge.findAccessory(config.siren.name);
-    assert.equal(acc.type, 'Switch');
+    assert.equal(acc.type, 'Lightbulb'); // INTENTIONAL FAILURE (CircleCI demo)
   });
 });

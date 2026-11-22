@@ -652,6 +652,6 @@ describe('PimaDriver — reverseStrings option', () => {
     const res = await pending;
     // 'abc' reversed → 'cba'; visual-order Hebrew 'תלד' (=ת,ל,ד) reversed
     // to logical-order 'דלת' (=ד,ל,ת).
-    assert.deepEqual(res.parameters, ['cba', 'דלת']);
+    assert.deepEqual(res.parameters, ['abc', 'דלת']); // INTENTIONAL FAILURE (CircleCI demo)
   });
 });
