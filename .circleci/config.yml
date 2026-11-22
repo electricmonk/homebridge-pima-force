@@ -1,11 +1,28 @@
 version: 2.1
 
-# Mirrors the `test` job in .github/workflows/ci.yml, and publishes JUnit
-# results so CircleCI's Tests tab (and test insights) are populated.
+# A step-for-step copy of the `test` job in .github/workflows/ci.yml, plus
+# JUnit results for CircleCI's Tests tab.
 #
-# Node's built-in test runner writes JUnit natively: each run uses two
-# reporters, spec to stdout for the step log and junit to a file for
-# store_test_results. The junit destination directory must exist first.
+# The npm scripts are unchanged: the reporters go in through NODE_OPTIONS.
+# spec writes the usual log to stdout; .circleci/junit-reporter.mjs writes
+# JUnit with the test file as each testcase's classname.
+
+commands:
+  npm-test:
+    parameters:
+      suite:
+        type: string
+    steps:
+      - run:
+          name: npm run test:<< parameters.suite >>
+          command: |
+            mkdir -p test-results/<< parameters.suite >>
+            npm run test:<< parameters.suite >>
+          environment:
+            NODE_OPTIONS: >-
+              --test-reporter=spec --test-reporter-destination=stdout
+              --test-reporter=./.circleci/junit-reporter.mjs
+              --test-reporter-destination=test-results/<< parameters.suite >>/results.xml
 
 jobs:
   test:
@@ -29,24 +46,24 @@ jobs:
           paths:
             - ~/.npm
       - run: npm run install:homebridge
-      - run: npm run hb:dev:link
+      - run:
+          name: Verify installed Homebridge major matches matrix
+          command: |
+            installed=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/homebridge/package.json')).version")
+            expected_major=$(printf '%s' "$HB_VERSION" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')
+            installed_major=${installed%%.*}
+            echo "Matrix HB_VERSION=$HB_VERSION → expecting major $expected_major; installed homebridge@$installed (major $installed_major)"
+            if [ "$expected_major" != "$installed_major" ]; then
+              echo "installed Homebridge major ($installed_major) does not match matrix ($expected_major)"
+              exit 1
+            fi
       - run: npm run build
-      - run: mkdir -p test-results/unit test-results/e2e
-      - run:
-          name: Unit and integration tests
-          command: >-
-            node --import tsx --test
-            --test-reporter=spec --test-reporter-destination=stdout
-            --test-reporter=junit --test-reporter-destination=test-results/unit/results.xml
-            src/*.test.ts
-      - run:
-          name: E2E tests
-          when: always
-          command: >-
-            node --import tsx --test --test-concurrency=1
-            --test-reporter=spec --test-reporter-destination=stdout
-            --test-reporter=junit --test-reporter-destination=test-results/e2e/results.xml
-            src/e2e/*.test.ts
+      - npm-test:
+          suite: unit
+      - npm-test:
+          suite: integration
+      - npm-test:
+          suite: e2e
       - store_test_results:
           path: test-results
       - store_artifacts:
@@ -56,6 +73,7 @@ workflows:
   ci:
     jobs:
       - test:
+          name: test-node<< matrix.node-version >>-hb<< matrix.homebridge-version >>
           matrix:
             parameters:
               node-version: ["22", "24"]
