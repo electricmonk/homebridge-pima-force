@@ -1,31 +1,80 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
-# See: https://circleci.com/docs/reference/configuration-reference/
 version: 2.1
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#jobs-overview & https://circleci.com/docs/reference/configuration-reference/#jobs
-jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/guides/execution-managed/executor-intro/ & https://circleci.com/docs/reference/configuration-reference/#executor-job
-    docker:
-      # Specify the version you desire here
-      # See: https://circleci.com/developer/images/image/cimg/base
-      - image: cimg/base:current
+# A step-for-step copy of the `test` job in .github/workflows/ci.yml, plus
+# JUnit results for CircleCI's Tests tab.
+#
+# The npm scripts are unchanged: the reporters go in through NODE_OPTIONS.
+# spec writes the usual log to stdout; .circleci/junit-reporter.mjs writes
+# JUnit with the test file as each testcase's classname.
 
-    # Add steps to the job
-    # See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#steps-overview & https://circleci.com/docs/reference/configuration-reference/#steps
+commands:
+  npm-test:
+    parameters:
+      suite:
+        type: string
     steps:
-      # Checkout the code as the first step.
-      - checkout
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
+          name: npm run test:<< parameters.suite >>
+          command: |
+            mkdir -p test-results/<< parameters.suite >>
+            npm run test:<< parameters.suite >>
+          environment:
+            NODE_OPTIONS: >-
+              --test-reporter=spec --test-reporter-destination=stdout
+              --test-reporter=./.circleci/junit-reporter.mjs
+              --test-reporter-destination=test-results/<< parameters.suite >>/results.xml
 
-# Orchestrate jobs using workflows
-# See: https://circleci.com/docs/guides/orchestrate/workflows/ & https://circleci.com/docs/reference/configuration-reference/#workflows
+jobs:
+  test:
+    parameters:
+      node-version:
+        type: string
+      homebridge-version:
+        type: string
+    docker:
+      - image: cimg/node:<< parameters.node-version >>
+    environment:
+      HB_VERSION: << parameters.homebridge-version >>
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - npm-v1-<< parameters.node-version >>-{{ checksum "package-lock.json" }}
+      - run: npm ci
+      - save_cache:
+          key: npm-v1-<< parameters.node-version >>-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run: npm run install:homebridge
+      - run:
+          name: Verify installed Homebridge major matches matrix
+          command: |
+            installed=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/homebridge/package.json')).version")
+            expected_major=$(printf '%s' "$HB_VERSION" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')
+            installed_major=${installed%%.*}
+            echo "Matrix HB_VERSION=$HB_VERSION → expecting major $expected_major; installed homebridge@$installed (major $installed_major)"
+            if [ "$expected_major" != "$installed_major" ]; then
+              echo "installed Homebridge major ($installed_major) does not match matrix ($expected_major)"
+              exit 1
+            fi
+      - run: npm run build
+      - npm-test:
+          suite: unit
+      - npm-test:
+          suite: integration
+      - npm-test:
+          suite: e2e
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+
 workflows:
-  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
-    # Inside the workflow, you define the jobs you want to run.
+  ci:
     jobs:
-      - say-hello
+      - test:
+          name: test-node<< matrix.node-version >>-hb<< matrix.homebridge-version >>
+          matrix:
+            parameters:
+              node-version: ["22", "24"]
+              homebridge-version: ["^1.8.0", "^2.0.0"]

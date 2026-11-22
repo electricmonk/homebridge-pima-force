@@ -5,3 +5,4 @@ dist
 .claude
 tools
 hb-dev
+test-results/
