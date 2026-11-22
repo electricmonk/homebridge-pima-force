@@ -70,7 +70,7 @@ export interface PanelFrame {
   [k: string]: unknown;
 }
 
-export type ArmEventSource = 'remote' | 'local' | 'unknown';
+export type ArmEventSource = 'remote' | 'local' | 'home' | 'unknown';
 
 export interface ArmEvent {
   partition: number;
