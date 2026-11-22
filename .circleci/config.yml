@@ -15,6 +15,7 @@ commands:
     steps:
       - run:
           name: npm run test:<< parameters.suite >>
+          when: always # demo only: run every suite even after one fails
           command: |
             mkdir -p test-results/<< parameters.suite >>
             npm run test:<< parameters.suite >>
